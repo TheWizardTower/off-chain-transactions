@@ -118,7 +118,7 @@ async fn write_ledger(ledger: &mut HashMap<u16, AccountInfo>) -> Result<()> {
         .has_headers(true)
         .create_serializer(io::stdout());
 
-    for entry in ledger.into_iter().map(|(client_id, account_info)| {
+    for entry in ledger.iter_mut().map(|(client_id, account_info)| {
         convert_account_info_to_account_info_with_total(account_info, client_id)
     }) {
         wri.serialize(entry).await?;
