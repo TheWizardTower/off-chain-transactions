@@ -1,4 +1,5 @@
 use anyhow::Result;
+use log::info;
 use std::collections::HashMap;
 use std::path::Path;
 use tokio::fs::File;
@@ -88,12 +89,14 @@ enum TransactionError {
 
 #[tokio::main]
 pub async fn main() -> Result<()> {
-    eprintln!("Hello, world!");
+    env_logger::init();
+
+    info!("Hello, world!");
 
     let args: Vec<_> = std::env::args().collect();
     let filename = match args.get(2) {
         None => {
-            // eprintln!("Require filename to read in as an argument.");
+            // error!("Require filename to read in as an argument.");
             // std::process::exit(-1);
             // Assume that the default is "transactions.csv"
             "transactions.csv".to_string()
@@ -101,10 +104,10 @@ pub async fn main() -> Result<()> {
         Some(file_name) => file_name.to_string(),
     };
 
-    eprintln!("Filename: {filename}");
+    info!("Filename: {filename}");
 
     let mut ledger = process_transactions(filename).await?;
-    eprintln!("Resulting ledger length: {}", ledger.len());
+    info!("Resulting ledger length: {}", ledger.len());
     write_ledger(&mut ledger).await?;
 
     Ok(())
@@ -160,18 +163,18 @@ fn process_transaction(
 ) {
     match record.tx_type {
         TransactionType::Deposit => {
-            eprintln!("Found a deposit.");
+            info!("Found a deposit.");
             if !transaction_id_is_new(&record.tx, &transaction_ledger) {
                 // We've encountered an invalid transaction ID. Assume
                 // that we should refuse to process the transaction
                 // and continue on.
-                eprintln!("Deposit: Duplicate transaction ID.");
+                info!("Deposit: Duplicate transaction ID.");
                 failed_transactions
                     .push((record.clone(), TransactionError::DuplicateTransactionId));
                 return;
             }
             if record.amount.is_none() {
-                eprintln!("Deposit: Missing amount field.");
+                info!("Deposit: Missing amount field.");
                 failed_transactions.push((record.clone(), TransactionError::MissingAmountField));
                 return;
             }
@@ -186,7 +189,7 @@ fn process_transaction(
                     }
                 }
             }
-            eprintln!("\tInserting deposit.");
+            info!("\tInserting deposit.");
 
             result
                 .entry(record.client)
@@ -198,21 +201,21 @@ fn process_transaction(
             transaction_ledger.insert(record.tx, record.clone());
         }
         TransactionType::Withdrawal => {
-            eprintln!("Found a Withdrawal.");
+            info!("Found a Withdrawal.");
             if !transaction_id_is_new(&record.tx, &transaction_ledger) {
                 // We've encountered an invalid transaction ID. Assume that we should refuse to process the transaction and continue on.
-                eprintln!("Withdrawal: Duplicate transaction ID.");
+                info!("Withdrawal: Duplicate transaction ID.");
                 failed_transactions
                     .push((record.clone(), TransactionError::DuplicateTransactionId));
             }
             if record.amount.is_none() {
-                eprintln!("Withdrawal: Missing Amount Field.");
+                info!("Withdrawal: Missing Amount Field.");
                 failed_transactions.push((record.clone(), TransactionError::MissingAmountField));
                 return;
             }
 
             if !result.contains_key(&record.client) {
-                eprintln!("Withdrawal: Cannot Withdraw from Nonexistant Client.");
+                info!("Withdrawal: Cannot Withdraw from Nonexistant Client.");
                 failed_transactions.push((
                     record.clone(),
                     TransactionError::CannotWithdrawFromNonexistantClient,
