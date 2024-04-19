@@ -8,15 +8,16 @@ use tokio_stream::StreamExt;
 pub type Error = Box<dyn std::error::Error + Send + Sync>;
 pub type Result<T> = std::result::Result<T, Error>;
 
-enum TransactionError {
+#[derive(Clone, Debug, PartialEq)]
+pub enum TransactionError {
     MissingSource,
     MissingDest,
     Overdraft,
     MissingSourceAndDest,
 }
 
-#[derive(Clone, Debug, serde::Deserialize)]
-struct LedgerEntry {
+#[derive(Clone, Debug, serde::Deserialize, PartialEq)]
+pub struct LedgerEntry {
     source: String,
     dest: String,
     amount: u32,
