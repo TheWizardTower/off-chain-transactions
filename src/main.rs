@@ -183,6 +183,7 @@ fn process_transaction(
                 None => (),
                 Some(client_info) => {
                     if client_info.locked {
+                        info!("Deposit: Cannot Deposit into Locked Account.");
                         failed_transactions.push((
                             record.clone(),
                             TransactionError::CannotDepoistIntoLockedAccount,
@@ -209,6 +210,7 @@ fn process_transaction(
                 info!("Withdrawal: Duplicate transaction ID.");
                 failed_transactions
                     .push((record.clone(), TransactionError::DuplicateTransactionId));
+                return;
             }
 
             if record.amount.is_none() {
@@ -507,6 +509,38 @@ mod tests {
         assert_eq!(failed_transactions, expected_failed_transactions);
         assert_eq!(result, expected_result);
         assert_eq!(transaction_ledger, HashMap::from([]));
+    }
+
+    #[test]
+    fn test_deposit_duplicate_transaction_id() {
+        let mut result = get_default_ledger();
+        let expected_result = get_default_ledger();
+
+        let record = LedgerEntry {
+            tx_type: TransactionType::Deposit,
+            client: 1,
+            tx: 1,
+            amount: Some(50.0),
+            is_disputed: false,
+        };
+
+        let mut transaction_ledger: HashMap<u32, LedgerEntry> =
+            HashMap::from([(1, record.clone())]);
+        let expected_transaction_ledger: HashMap<u32, LedgerEntry> = transaction_ledger.clone();
+        let mut failed_transactions: Vec<(LedgerEntry, TransactionError)> = vec![];
+        let expected_failed_transactions =
+            vec![(record.clone(), TransactionError::DuplicateTransactionId)];
+
+        process_transaction(
+            &record,
+            &mut result,
+            &mut transaction_ledger,
+            &mut failed_transactions,
+        );
+
+        assert_eq!(failed_transactions, expected_failed_transactions);
+        assert_eq!(result, expected_result);
+        assert_eq!(transaction_ledger, expected_transaction_ledger);
     }
 
     #[test]
