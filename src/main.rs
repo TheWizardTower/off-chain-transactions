@@ -62,7 +62,7 @@ pub async fn accounts_init(filename: impl AsRef<Path>) -> Result<HashMap<String,
     Ok(result)
 }
 
-pub async fn process_records(
+pub async fn process_transactions(
     ledger: &mut HashMap<String, i64>,
     filename: impl AsRef<Path>,
 ) -> Result<Either<Vec<(LedgerEntry, TransactionError)>, ()>> {
