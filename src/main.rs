@@ -38,7 +38,7 @@ pub async fn main() -> Result<()> {
     process_transactions(&mut ledger, "offchain_transactions.csv").await?;
 
     println!("\n\nFinal balance:");
-    for (name, bal) in ledger {
+    for (name, bal) in &ledger {
         println!("\t{name}: {bal}");
     }
 
