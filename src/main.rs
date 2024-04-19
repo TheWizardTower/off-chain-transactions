@@ -450,6 +450,63 @@ mod tests {
     }
 
     #[test]
+    fn test_deposit_missing_amount_field() {
+        let mut result = HashMap::from([]);
+        let mut transaction_ledger: HashMap<u32, LedgerEntry> = HashMap::from([]);
+        let mut failed_transactions: Vec<(LedgerEntry, TransactionError)> = vec![];
+
+        let record = LedgerEntry {
+            tx_type: TransactionType::Deposit,
+            client: 1,
+            tx: 1,
+            amount: None,
+            is_disputed: false,
+        };
+
+        process_transaction(
+            &record,
+            &mut result,
+            &mut transaction_ledger,
+            &mut failed_transactions,
+        );
+
+        assert_eq!(
+            failed_transactions,
+            vec![(record.clone(), TransactionError::MissingAmountField)]
+        );
+        assert_eq!(transaction_ledger, HashMap::from([]));
+        assert_eq!(result, HashMap::from([]));
+    }
+
+    #[test]
+    fn test_withdraw_missing_amount_field() {
+        let mut result = HashMap::from([]);
+        let mut transaction_ledger: HashMap<u32, LedgerEntry> = HashMap::from([]);
+        let mut failed_transactions: Vec<(LedgerEntry, TransactionError)> = vec![];
+
+        let record = LedgerEntry {
+            tx_type: TransactionType::Withdrawal,
+            client: 1,
+            tx: 1,
+            amount: None,
+            is_disputed: false,
+        };
+
+        process_transaction(
+            &record,
+            &mut result,
+            &mut transaction_ledger,
+            &mut failed_transactions,
+        );
+
+        assert_eq!(
+            failed_transactions,
+            vec![(record.clone(), TransactionError::MissingAmountField)]
+        );
+        assert_eq!(transaction_ledger, HashMap::from([]));
+        assert_eq!(result, HashMap::from([]));
+    }
+    #[test]
     fn test_deposit_on_populated_ledger() {
         let mut result = get_default_ledger();
         let mut expected_result = get_default_ledger();
@@ -530,6 +587,69 @@ mod tests {
         let mut failed_transactions: Vec<(LedgerEntry, TransactionError)> = vec![];
         let expected_failed_transactions =
             vec![(record.clone(), TransactionError::DuplicateTransactionId)];
+
+        process_transaction(
+            &record,
+            &mut result,
+            &mut transaction_ledger,
+            &mut failed_transactions,
+        );
+
+        assert_eq!(failed_transactions, expected_failed_transactions);
+        assert_eq!(result, expected_result);
+        assert_eq!(transaction_ledger, expected_transaction_ledger);
+    }
+
+    #[test]
+    fn test_withdraw_duplicate_transaction_id() {
+        let mut result = get_default_ledger();
+        let expected_result = get_default_ledger();
+
+        let record = LedgerEntry {
+            tx_type: TransactionType::Withdrawal,
+            client: 1,
+            tx: 1,
+            amount: Some(50.0),
+            is_disputed: false,
+        };
+
+        let mut transaction_ledger: HashMap<u32, LedgerEntry> =
+            HashMap::from([(1, record.clone())]);
+        let expected_transaction_ledger: HashMap<u32, LedgerEntry> = transaction_ledger.clone();
+        let mut failed_transactions: Vec<(LedgerEntry, TransactionError)> = vec![];
+        let expected_failed_transactions =
+            vec![(record.clone(), TransactionError::DuplicateTransactionId)];
+
+        process_transaction(
+            &record,
+            &mut result,
+            &mut transaction_ledger,
+            &mut failed_transactions,
+        );
+
+        assert_eq!(failed_transactions, expected_failed_transactions);
+        assert_eq!(result, expected_result);
+        assert_eq!(transaction_ledger, expected_transaction_ledger);
+    }
+
+    #[test]
+    fn test_withdraw_overdraft() {
+        let mut result = get_default_ledger();
+        let expected_result = get_default_ledger();
+
+        let record = LedgerEntry {
+            tx_type: TransactionType::Withdrawal,
+            client: 1,
+            tx: 1,
+            amount: Some(50_000.0),
+            is_disputed: false,
+        };
+
+        let mut transaction_ledger: HashMap<u32, LedgerEntry> = HashMap::from([]);
+        let expected_transaction_ledger: HashMap<u32, LedgerEntry> = transaction_ledger.clone();
+        let mut failed_transactions: Vec<(LedgerEntry, TransactionError)> = vec![];
+        let expected_failed_transactions =
+            vec![(record.clone(), TransactionError::CannotOverdrawByWithdrawal)];
 
         process_transaction(
             &record,
