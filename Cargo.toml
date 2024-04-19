@@ -6,5 +6,5 @@ edition = "2021"
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
 [dependencies]
-tokio = { version = "1.37.0", features = ["fs", "io-util", "io-std"] }
+tokio = { version = "1.37.0", features = ["full"] }
 tokio-stream = { version = "0.1.15", features = ["fs", "io-util"] }
