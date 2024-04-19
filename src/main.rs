@@ -1,5 +1,5 @@
 use anyhow::Result;
-use log::info;
+use log::{debug, info};
 use std::collections::HashMap;
 use std::path::Path;
 use tokio::fs::File;
@@ -163,8 +163,8 @@ fn process_transaction(
 ) {
     match record.tx_type {
         TransactionType::Deposit => {
-            info!("Found a deposit.");
-            if !transaction_id_is_new(&record.tx, &transaction_ledger) {
+            debug!("Found a deposit.");
+            if !transaction_id_is_new(&record.tx, transaction_ledger) {
                 // We've encountered an invalid transaction ID. Assume
                 // that we should refuse to process the transaction
                 // and continue on.
@@ -201,13 +201,14 @@ fn process_transaction(
             transaction_ledger.insert(record.tx, record.clone());
         }
         TransactionType::Withdrawal => {
-            info!("Found a Withdrawal.");
-            if !transaction_id_is_new(&record.tx, &transaction_ledger) {
+            debug!("Found a Withdrawal.");
+            if !transaction_id_is_new(&record.tx, transaction_ledger) {
                 // We've encountered an invalid transaction ID. Assume that we should refuse to process the transaction and continue on.
                 info!("Withdrawal: Duplicate transaction ID.");
                 failed_transactions
                     .push((record.clone(), TransactionError::DuplicateTransactionId));
             }
+
             if record.amount.is_none() {
                 info!("Withdrawal: Missing Amount Field.");
                 failed_transactions.push((record.clone(), TransactionError::MissingAmountField));
@@ -223,6 +224,7 @@ fn process_transaction(
                 return;
             }
             if result.get(&record.client).unwrap().locked {
+                info!("Withdrawal: Cannot Withdraw from Locked Account.");
                 failed_transactions.push((
                     record.clone(),
                     TransactionError::CannotWithdrawFromLockedAccount,
@@ -230,25 +232,33 @@ fn process_transaction(
                 return;
             }
             if result.get(&record.client).unwrap().available < record.amount.unwrap() {
+                info!("Withdrawal: Cannot Overdraft Account.");
                 failed_transactions
                     .push((record.clone(), TransactionError::CannotOverdrawByWithdrawal));
                 return;
             }
 
+            debug!("Withdraw: Processing transaction.");
             result
                 .entry(record.client)
                 .and_modify(|client_data| client_data.available -= record.amount.unwrap());
             transaction_ledger.insert(record.tx, record.clone());
         }
         TransactionType::Dispute => {
+            debug!("Found a Dispute.");
+            // We check the customer first because, if the customer
+            // does not exist, than the associated transaction
+            // probably doesn't, either.
             if !result.contains_key(&record.client) {
+                info!("Dispute: Cannot Dispute Transaction for Nonexistant Customer");
                 failed_transactions.push((
                     record.clone(),
                     TransactionError::CannotDisputeTransactionForNonexistantCustomer,
                 ));
             }
-            if transaction_id_is_new(&record.tx, &transaction_ledger) {
+            if transaction_id_is_new(&record.tx, transaction_ledger) {
                 // We're trying to dispute a non-existant transaction.
+                info!("Dispute: Cannot Dispute Non-existant Transaction.");
                 failed_transactions.push((
                     record.clone(),
                     TransactionError::CannotDisputeNonexistantTransaction,
@@ -256,27 +266,33 @@ fn process_transaction(
                 return;
             }
             if transaction_ledger.get(&record.tx).unwrap().is_disputed {
+                info!("Dispute: Cannot Dispute Already Disputed Transaction.");
                 failed_transactions.push((
                     record.clone(),
                     TransactionError::CannotDisputeAlreadyDisputedTransaction,
                 ));
                 return;
             }
-            let transaction_amount = get_transaction_amount(&record.tx, &transaction_ledger);
+            // What should we do in the case of a locked account?
+            debug!("Dispute: Processing Dispute.");
+            let transaction_amount = get_transaction_amount(&record.tx, transaction_ledger);
             result.entry(record.client).and_modify(|client_data| {
                 client_data.available -= transaction_amount;
                 client_data.held += transaction_amount;
             });
         }
         TransactionType::Resolve => {
+            debug!("Found a Resolve.");
             if !result.contains_key(&record.client) {
+                info!("Resolve: Cannot Resolve Transaction for Nonexistant Customer.");
                 failed_transactions.push((
                     record.clone(),
                     TransactionError::CannotResolveTransactionForNonexistantCustomer,
                 ));
             }
-            if transaction_id_is_new(&record.tx, &transaction_ledger) {
+            if transaction_id_is_new(&record.tx, transaction_ledger) {
                 // We're trying to resolve a non-existant transaction.
+                info!("Resolve: Cannot Resolve Non-existant Transaction.");
                 failed_transactions.push((
                     record.clone(),
                     TransactionError::CannotResolveNonexistantTransaction,
@@ -284,41 +300,54 @@ fn process_transaction(
                 return;
             }
             if !transaction_ledger.get(&record.tx).unwrap().is_disputed {
+                info!("Resolve: Cannot Resolve Undisputed Transaction.");
                 failed_transactions.push((
                     record.clone(),
                     TransactionError::CannotResolveUndisputedTransaction,
                 ));
                 return;
             }
-            let transaction_amount = get_transaction_amount(&record.tx, &transaction_ledger);
+            // What should we do in the case of a locked account?
+            let transaction_amount = get_transaction_amount(&record.tx, transaction_ledger);
             result.entry(record.client).and_modify(|client_data| {
                 client_data.available += transaction_amount;
                 client_data.held -= transaction_amount;
             });
         }
         TransactionType::Chargeback => {
-            if transaction_id_is_new(&record.tx, &transaction_ledger) {
-                // We're trying to resolve a non-existant transaction.
+            debug!("Found a Chargeback.");
+            if !result.contains_key(&record.client) {
+                info!("Chargeback: Cannot Chargeback Transaction For Non-Existant Customer.");
+                failed_transactions.push((
+                    record.clone(),
+                    TransactionError::CannotChargebackTransactionForNonexistantCustomer,
+                ));
+            }
+            if transaction_id_is_new(&record.tx, transaction_ledger) {
+                // We're trying to chargeback a non-existant transaction.
+                info!("Chargeback: Cannot Chargeback a Non-existant Transaction.");
                 failed_transactions.push((
                     record.clone(),
                     TransactionError::CannotChargebackNonexistantTransaction,
                 ));
                 return;
             }
-            if !result.contains_key(&record.client) {
-                failed_transactions.push((
-                    record.clone(),
-                    TransactionError::CannotChargebackTransactionForNonexistantCustomer,
-                ));
-            }
             if !transaction_ledger.get(&record.tx).unwrap().is_disputed {
+                info!("Chargeback: Cannot Chargeback Undisputed Transaction.");
                 failed_transactions.push((
                     record.clone(),
                     TransactionError::CannotChargebackUndisputedTransaction,
                 ));
                 return;
             }
-            let transaction_amount = get_transaction_amount(&record.tx, &transaction_ledger);
+
+            // Note that, while you cannot deposit or withdraw from a
+            // locked acocunt, you most certainly can and should be
+            // able to chargeback from such an account. In fact, if
+            // someone is guilty of serial fraud, such a circumstance
+            // is quite likely. As such, there's no check if the
+            // account is already locked.
+            let transaction_amount = get_transaction_amount(&record.tx, transaction_ledger);
             result.entry(record.client).and_modify(|client_data| {
                 client_data.held -= transaction_amount;
                 client_data.locked = true;
