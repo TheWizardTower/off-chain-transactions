@@ -75,7 +75,7 @@ pub async fn process_transactions(
         let record: LedgerEntry = record?;
         println!("{:?}", record);
 
-        let record_amount: i64 = record.amount.into();
+        let record_amount = i64::from(record.amount);
         match (
             ledger.contains_key(&record.source),
             ledger.contains_key(&record.dest),
