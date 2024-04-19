@@ -69,10 +69,11 @@ enum LedgerEntryEnum {
     Chargeback { client: u16, tx: u32 },
 }
 
+#[derive(Debug, PartialEq)]
 enum TransactionError {
     DuplicateTransactionId,
     MissingAmountField,
-    CannotWithdrawFromNonexistantClient,
+    CannotWithdrawFromNonexistantCustomer,
     CannotOverdrawByWithdrawal,
     CannotDisputeNonexistantTransaction,
     CannotDisputeTransactionForNonexistantCustomer,
@@ -186,6 +187,7 @@ fn process_transaction(
                             record.clone(),
                             TransactionError::CannotDepoistIntoLockedAccount,
                         ));
+                        return;
                     }
                 }
             }
@@ -219,7 +221,7 @@ fn process_transaction(
                 info!("Withdrawal: Cannot Withdraw from Nonexistant Client.");
                 failed_transactions.push((
                     record.clone(),
-                    TransactionError::CannotWithdrawFromNonexistantClient,
+                    TransactionError::CannotWithdrawFromNonexistantCustomer,
                 ));
                 return;
             }
@@ -255,6 +257,7 @@ fn process_transaction(
                     record.clone(),
                     TransactionError::CannotDisputeTransactionForNonexistantCustomer,
                 ));
+                return;
             }
             if transaction_id_is_new(&record.tx, transaction_ledger) {
                 // We're trying to dispute a non-existant transaction.
@@ -289,6 +292,7 @@ fn process_transaction(
                     record.clone(),
                     TransactionError::CannotResolveTransactionForNonexistantCustomer,
                 ));
+                return;
             }
             if transaction_id_is_new(&record.tx, transaction_ledger) {
                 // We're trying to resolve a non-existant transaction.
@@ -322,7 +326,9 @@ fn process_transaction(
                     record.clone(),
                     TransactionError::CannotChargebackTransactionForNonexistantCustomer,
                 ));
+                return;
             }
+
             if transaction_id_is_new(&record.tx, transaction_ledger) {
                 // We're trying to chargeback a non-existant transaction.
                 info!("Chargeback: Cannot Chargeback a Non-existant Transaction.");
@@ -370,5 +376,232 @@ fn convert_account_info_to_account_info_with_total(
         held: ai.held,
         total: ai.available + ai.held,
         locked: ai.locked,
+    }
+}
+
+mod tests {
+    use super::*;
+
+    fn get_default_ledger() -> HashMap<u16, AccountInfo> {
+        HashMap::from([
+            (
+                1,
+                AccountInfo {
+                    available: 50.0,
+                    held: 0.0,
+                    locked: false,
+                },
+            ),
+            (
+                2,
+                AccountInfo {
+                    available: 0.0,
+                    held: 0.0,
+                    locked: true,
+                },
+            ),
+            (
+                3,
+                AccountInfo {
+                    available: 500.0,
+                    held: 100.0,
+                    locked: false,
+                },
+            ),
+        ])
+    }
+
+    #[test]
+    fn test_deposit_on_empty_ledger() {
+        let mut result = HashMap::from([]);
+        let mut transaction_ledger: HashMap<u32, LedgerEntry> = HashMap::from([]);
+        let mut failed_transactions: Vec<(LedgerEntry, TransactionError)> = vec![];
+
+        let record = LedgerEntry {
+            tx_type: TransactionType::Deposit,
+            client: 1,
+            tx: 1,
+            amount: Some(50.0),
+            is_disputed: false,
+        };
+
+        process_transaction(
+            &record,
+            &mut result,
+            &mut transaction_ledger,
+            &mut failed_transactions,
+        );
+
+        assert_eq!(failed_transactions, vec![]);
+        assert_eq!(transaction_ledger, HashMap::from([(1, record.clone())]));
+        assert_eq!(
+            result,
+            HashMap::from([(
+                1,
+                AccountInfo {
+                    available: 50.0,
+                    held: 0.0,
+                    locked: false
+                }
+            )])
+        );
+    }
+
+    #[test]
+    fn test_deposit_on_populated_ledger() {
+        let mut result = get_default_ledger();
+        let mut expected_result = get_default_ledger();
+        expected_result
+            .entry(1)
+            .and_modify(|client_info| client_info.available += 50.0);
+        let mut transaction_ledger: HashMap<u32, LedgerEntry> = HashMap::from([]);
+        let mut failed_transactions: Vec<(LedgerEntry, TransactionError)> = vec![];
+
+        let record = LedgerEntry {
+            tx_type: TransactionType::Deposit,
+            client: 1,
+            tx: 1,
+            amount: Some(50.0),
+            is_disputed: false,
+        };
+
+        process_transaction(
+            &record,
+            &mut result,
+            &mut transaction_ledger,
+            &mut failed_transactions,
+        );
+
+        assert_eq!(failed_transactions, vec![]);
+        assert_eq!(result, expected_result);
+        assert_eq!(transaction_ledger, HashMap::from([(1, record.clone())]));
+    }
+
+    #[test]
+    fn test_deposit_on_locked_account() {
+        let mut result = get_default_ledger();
+        let expected_result = get_default_ledger();
+        let mut transaction_ledger: HashMap<u32, LedgerEntry> = HashMap::from([]);
+        let mut failed_transactions: Vec<(LedgerEntry, TransactionError)> = vec![];
+
+        let record = LedgerEntry {
+            tx_type: TransactionType::Deposit,
+            client: 2,
+            tx: 1,
+            amount: Some(50.0),
+            is_disputed: false,
+        };
+
+        let expected_failed_transactions = vec![(
+            record.clone(),
+            TransactionError::CannotDepoistIntoLockedAccount,
+        )];
+
+        process_transaction(
+            &record,
+            &mut result,
+            &mut transaction_ledger,
+            &mut failed_transactions,
+        );
+
+        assert_eq!(failed_transactions, expected_failed_transactions);
+        assert_eq!(result, expected_result);
+        assert_eq!(transaction_ledger, HashMap::from([]));
+    }
+
+    #[test]
+    fn test_withdraw_from_locked_account() {
+        let mut result = get_default_ledger();
+        let expected_result = get_default_ledger();
+        let mut transaction_ledger: HashMap<u32, LedgerEntry> = HashMap::from([]);
+        let mut failed_transactions: Vec<(LedgerEntry, TransactionError)> = vec![];
+
+        let record = LedgerEntry {
+            tx_type: TransactionType::Withdrawal,
+            client: 2,
+            tx: 1,
+            amount: Some(50.0),
+            is_disputed: false,
+        };
+
+        let expected_failed_transactions = vec![(
+            record.clone(),
+            TransactionError::CannotWithdrawFromLockedAccount,
+        )];
+
+        process_transaction(
+            &record,
+            &mut result,
+            &mut transaction_ledger,
+            &mut failed_transactions,
+        );
+
+        assert_eq!(failed_transactions, expected_failed_transactions);
+        assert_eq!(result, expected_result);
+        assert_eq!(transaction_ledger, HashMap::from([]));
+    }
+
+    #[test]
+    fn test_withdraw_from_nonexistant_client() {
+        let mut result = get_default_ledger();
+        let expected_result = get_default_ledger();
+        let mut transaction_ledger: HashMap<u32, LedgerEntry> = HashMap::from([]);
+        let mut failed_transactions: Vec<(LedgerEntry, TransactionError)> = vec![];
+
+        let record = LedgerEntry {
+            tx_type: TransactionType::Withdrawal,
+            client: 5,
+            tx: 1,
+            amount: Some(50.0),
+            is_disputed: false,
+        };
+
+        let expected_failed_transactions = vec![(
+            record.clone(),
+            TransactionError::CannotWithdrawFromNonexistantCustomer,
+        )];
+
+        process_transaction(
+            &record,
+            &mut result,
+            &mut transaction_ledger,
+            &mut failed_transactions,
+        );
+
+        assert_eq!(failed_transactions, expected_failed_transactions);
+        assert_eq!(result, expected_result);
+        assert_eq!(transaction_ledger, HashMap::from([]));
+    }
+
+    #[test]
+    fn test_dispute_on_nonexistant_client() {
+        let mut result = get_default_ledger();
+        let expected_result = get_default_ledger();
+        let mut transaction_ledger: HashMap<u32, LedgerEntry> = HashMap::from([]);
+        let mut failed_transactions: Vec<(LedgerEntry, TransactionError)> = vec![];
+
+        let record = LedgerEntry {
+            tx_type: TransactionType::Dispute,
+            client: 5,
+            tx: 1,
+            amount: None,
+            is_disputed: false,
+        };
+
+        let expected_failed_transactions = vec![(
+            record.clone(),
+            TransactionError::CannotDisputeTransactionForNonexistantCustomer,
+        )];
+
+        process_transaction(
+            &record,
+            &mut result,
+            &mut transaction_ledger,
+            &mut failed_transactions,
+        );
+
+        assert_eq!(failed_transactions, expected_failed_transactions);
+        assert_eq!(result, expected_result);
+        assert_eq!(transaction_ledger, HashMap::from([]));
     }
 }
