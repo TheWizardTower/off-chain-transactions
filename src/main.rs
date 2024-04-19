@@ -31,13 +31,9 @@ struct Balance {
 pub async fn main() -> Result<()> {
     println!("Hello, world!");
 
-    let mut ledger = accounts_init("init.csv".to_string())
-        .await
-        .expect("Could not read initial file.");
+    let mut ledger = accounts_init("init.csv").await?;
 
-    process_records(&mut ledger, "offchain_transactions.csv".to_string())
-        .await
-        .expect("Could not process transactions");
+    process_transactions(&mut ledger, "offchain_transactions.csv").await?;
 
     println!("\n\nFinal balance:");
     for (name, bal) in ledger {
@@ -47,7 +43,7 @@ pub async fn main() -> Result<()> {
     Ok(())
 }
 
-pub async fn accounts_init(filename: String) -> Result<HashMap<String, i64>> {
+pub async fn accounts_init(filename: impl AsRef<Path>) -> Result<HashMap<String, i64>> {
     let mut result = HashMap::new();
 
     let file_handle = File::open(filename).await?;
@@ -66,7 +62,7 @@ pub async fn accounts_init(filename: String) -> Result<HashMap<String, i64>> {
 
 pub async fn process_records(
     ledger: &mut HashMap<String, i64>,
-    filename: String,
+    filename: impl AsRef<Path>,
 ) -> Result<Either<Vec<(LedgerEntry, TransactionError)>, ()>> {
     let file_handle = File::open(filename).await?;
     let mut rdr = csv_async::AsyncDeserializer::from_reader(file_handle);
