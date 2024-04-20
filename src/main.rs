@@ -164,204 +164,292 @@ fn process_transaction(
 ) {
     match record.tx_type {
         TransactionType::Deposit => {
-            debug!("Found a deposit.");
-            if !transaction_id_is_new(&record.tx, transaction_ledger) {
-                // We've encountered an invalid transaction ID. Assume
-                // that we should refuse to process the transaction
-                // and continue on.
-                info!("Deposit: Duplicate transaction ID.");
-                failed_transactions
-                    .push((record.clone(), TransactionError::DuplicateTransactionId));
-                return;
-            }
-            if record.amount.is_none() {
-                info!("Deposit: Missing amount field.");
-                failed_transactions.push((record.clone(), TransactionError::MissingAmountField));
-                return;
-            }
-            match result.get(&record.client) {
-                None => (),
-                Some(client_info) => {
-                    if client_info.locked {
-                        info!("Deposit: Cannot Deposit into Locked Account.");
-                        failed_transactions.push((
-                            record.clone(),
-                            TransactionError::CannotDepoistIntoLockedAccount,
-                        ));
-                        return;
-                    }
-                }
-            }
-            info!("\tInserting deposit.");
-
-            result
-                .entry(record.client)
-                .and_modify(|client_data| client_data.available += record.amount.unwrap())
-                .or_insert(AccountInfo {
-                    available: record.amount.unwrap(),
-                    ..Default::default()
-                });
-            transaction_ledger.insert(record.tx, record.clone());
+            process_deposit(record, result, transaction_ledger, failed_transactions);
         }
         TransactionType::Withdrawal => {
-            debug!("Found a Withdrawal.");
-            if !transaction_id_is_new(&record.tx, transaction_ledger) {
-                // We've encountered an invalid transaction ID. Assume that we should refuse to process the transaction and continue on.
-                info!("Withdrawal: Duplicate transaction ID.");
-                failed_transactions
-                    .push((record.clone(), TransactionError::DuplicateTransactionId));
-                return;
-            }
-
-            if record.amount.is_none() {
-                info!("Withdrawal: Missing Amount Field.");
-                failed_transactions.push((record.clone(), TransactionError::MissingAmountField));
-                return;
-            }
-
-            if !result.contains_key(&record.client) {
-                info!("Withdrawal: Cannot Withdraw from Nonexistant Client.");
-                failed_transactions.push((
-                    record.clone(),
-                    TransactionError::CannotWithdrawFromNonexistantCustomer,
-                ));
-                return;
-            }
-            if result.get(&record.client).unwrap().locked {
-                info!("Withdrawal: Cannot Withdraw from Locked Account.");
-                failed_transactions.push((
-                    record.clone(),
-                    TransactionError::CannotWithdrawFromLockedAccount,
-                ));
-                return;
-            }
-            if result.get(&record.client).unwrap().available < record.amount.unwrap() {
-                info!("Withdrawal: Cannot Overdraft Account.");
-                failed_transactions
-                    .push((record.clone(), TransactionError::CannotOverdrawByWithdrawal));
-                return;
-            }
-
-            debug!("Withdraw: Processing transaction.");
-            result
-                .entry(record.client)
-                .and_modify(|client_data| client_data.available -= record.amount.unwrap());
-            transaction_ledger.insert(record.tx, record.clone());
+            process_withdrawal(record, result, transaction_ledger, failed_transactions);
         }
         TransactionType::Dispute => {
-            debug!("Found a Dispute.");
-            // We check the customer first because, if the customer
-            // does not exist, than the associated transaction
-            // probably doesn't, either.
-            if !result.contains_key(&record.client) {
-                info!("Dispute: Cannot Dispute Transaction for Nonexistant Customer");
-                failed_transactions.push((
-                    record.clone(),
-                    TransactionError::CannotDisputeTransactionForNonexistantCustomer,
-                ));
-                return;
-            }
-            if transaction_id_is_new(&record.tx, transaction_ledger) {
-                // We're trying to dispute a non-existant transaction.
-                info!("Dispute: Cannot Dispute Non-existant Transaction.");
-                failed_transactions.push((
-                    record.clone(),
-                    TransactionError::CannotDisputeNonexistantTransaction,
-                ));
-                return;
-            }
-            if transaction_ledger.get(&record.tx).unwrap().is_disputed {
-                info!("Dispute: Cannot Dispute Already Disputed Transaction.");
-                failed_transactions.push((
-                    record.clone(),
-                    TransactionError::CannotDisputeAlreadyDisputedTransaction,
-                ));
-                return;
-            }
-            // What should we do in the case of a locked account?
-            debug!("Dispute: Processing Dispute.");
-            let transaction_amount = get_transaction_amount(&record.tx, transaction_ledger);
-            result.entry(record.client).and_modify(|client_data| {
-                client_data.available -= transaction_amount;
-                client_data.held += transaction_amount;
-            });
+            process_dispute(record, result, transaction_ledger, failed_transactions);
         }
         TransactionType::Resolve => {
-            debug!("Found a Resolve.");
-            if !result.contains_key(&record.client) {
-                info!("Resolve: Cannot Resolve Transaction for Nonexistant Customer.");
-                failed_transactions.push((
-                    record.clone(),
-                    TransactionError::CannotResolveTransactionForNonexistantCustomer,
-                ));
-                return;
-            }
-            if transaction_id_is_new(&record.tx, transaction_ledger) {
-                // We're trying to resolve a non-existant transaction.
-                info!("Resolve: Cannot Resolve Non-existant Transaction.");
-                failed_transactions.push((
-                    record.clone(),
-                    TransactionError::CannotResolveNonexistantTransaction,
-                ));
-                return;
-            }
-            if !transaction_ledger.get(&record.tx).unwrap().is_disputed {
-                info!("Resolve: Cannot Resolve Undisputed Transaction.");
-                failed_transactions.push((
-                    record.clone(),
-                    TransactionError::CannotResolveUndisputedTransaction,
-                ));
-                return;
-            }
-            // What should we do in the case of a locked account?
-            let transaction_amount = get_transaction_amount(&record.tx, transaction_ledger);
-            result.entry(record.client).and_modify(|client_data| {
-                client_data.available += transaction_amount;
-                client_data.held -= transaction_amount;
-            });
+            process_resolve(record, result, transaction_ledger, failed_transactions);
         }
         TransactionType::Chargeback => {
-            debug!("Found a Chargeback.");
-            if !result.contains_key(&record.client) {
-                info!("Chargeback: Cannot Chargeback Transaction For Non-Existant Customer.");
-                failed_transactions.push((
-                    record.clone(),
-                    TransactionError::CannotChargebackTransactionForNonexistantCustomer,
-                ));
-                return;
-            }
-
-            if transaction_id_is_new(&record.tx, transaction_ledger) {
-                // We're trying to chargeback a non-existant transaction.
-                info!("Chargeback: Cannot Chargeback a Non-existant Transaction.");
-                failed_transactions.push((
-                    record.clone(),
-                    TransactionError::CannotChargebackNonexistantTransaction,
-                ));
-                return;
-            }
-            if !transaction_ledger.get(&record.tx).unwrap().is_disputed {
-                info!("Chargeback: Cannot Chargeback Undisputed Transaction.");
-                failed_transactions.push((
-                    record.clone(),
-                    TransactionError::CannotChargebackUndisputedTransaction,
-                ));
-                return;
-            }
-
-            // Note that, while you cannot deposit or withdraw from a
-            // locked acocunt, you most certainly can and should be
-            // able to chargeback from such an account. In fact, if
-            // someone is guilty of serial fraud, such a circumstance
-            // is quite likely. As such, there's no check if the
-            // account is already locked.
-            let transaction_amount = get_transaction_amount(&record.tx, transaction_ledger);
-            result.entry(record.client).and_modify(|client_data| {
-                client_data.held -= transaction_amount;
-                client_data.locked = true;
-            });
+            process_chargeback(record, result, transaction_ledger, failed_transactions);
         }
     }
+}
+
+fn process_deposit(
+    record: &LedgerEntry,
+    result: &mut HashMap<u16, AccountInfo>,
+    transaction_ledger: &mut HashMap<u32, LedgerEntry>,
+    failed_transactions: &mut Vec<(LedgerEntry, TransactionError)>,
+) {
+    debug!("Found a deposit.");
+    if !transaction_id_is_new(&record.tx, transaction_ledger) {
+        // We've encountered an invalid transaction ID. Assume
+        // that we should refuse to process the transaction
+        // and continue on.
+        info!("Deposit: Duplicate transaction ID.");
+        failed_transactions.push((record.clone(), TransactionError::DuplicateTransactionId));
+        return;
+    }
+    if record.amount.is_none() {
+        info!("Deposit: Missing amount field.");
+        failed_transactions.push((record.clone(), TransactionError::MissingAmountField));
+        return;
+    }
+    match result.get(&record.client) {
+        None => (),
+        Some(client_info) => {
+            if client_info.locked {
+                info!("Deposit: Cannot Deposit into Locked Account.");
+                failed_transactions.push((
+                    record.clone(),
+                    TransactionError::CannotDepoistIntoLockedAccount,
+                ));
+                return;
+            }
+        }
+    }
+    info!("\tInserting deposit.");
+
+    result
+        .entry(record.client)
+        .and_modify(|client_data| client_data.available += record.amount.unwrap())
+        .or_insert(AccountInfo {
+            available: record.amount.unwrap(),
+            ..Default::default()
+        });
+    transaction_ledger.insert(record.tx, record.clone());
+}
+
+fn process_withdrawal(
+    record: &LedgerEntry,
+    result: &mut HashMap<u16, AccountInfo>,
+    transaction_ledger: &mut HashMap<u32, LedgerEntry>,
+    failed_transactions: &mut Vec<(LedgerEntry, TransactionError)>,
+) {
+    debug!("Found a Withdrawal.");
+    if !transaction_id_is_new(&record.tx, transaction_ledger) {
+        // We've encountered an invalid transaction ID. Assume that we should refuse to process the transaction and continue on.
+        info!("Withdrawal: Duplicate transaction ID.");
+        failed_transactions.push((record.clone(), TransactionError::DuplicateTransactionId));
+        return;
+    }
+
+    if record.amount.is_none() {
+        info!("Withdrawal: Missing Amount Field.");
+        failed_transactions.push((record.clone(), TransactionError::MissingAmountField));
+        return;
+    }
+
+    if !result.contains_key(&record.client) {
+        info!("Withdrawal: Cannot Withdraw from Nonexistant Client.");
+        failed_transactions.push((
+            record.clone(),
+            TransactionError::CannotWithdrawFromNonexistantCustomer,
+        ));
+        return;
+    }
+    if result.get(&record.client).unwrap().locked {
+        info!("Withdrawal: Cannot Withdraw from Locked Account.");
+        failed_transactions.push((
+            record.clone(),
+            TransactionError::CannotWithdrawFromLockedAccount,
+        ));
+        return;
+    }
+    if result.get(&record.client).unwrap().available < record.amount.unwrap() {
+        info!("Withdrawal: Cannot Overdraft Account.");
+        failed_transactions.push((record.clone(), TransactionError::CannotOverdrawByWithdrawal));
+        return;
+    }
+
+    debug!("Withdraw: Processing transaction.");
+    result
+        .entry(record.client)
+        .and_modify(|client_data| client_data.available -= record.amount.unwrap());
+    transaction_ledger.insert(record.tx, record.clone());
+}
+
+fn process_dispute(
+    record: &LedgerEntry,
+    result: &mut HashMap<u16, AccountInfo>,
+    transaction_ledger: &mut HashMap<u32, LedgerEntry>,
+    failed_transactions: &mut Vec<(LedgerEntry, TransactionError)>,
+) {
+    // Open questions:
+    //
+    // * Can you dispute a _dispute_ ?
+    //   - My intuition is you shouldn't be able to, but this
+    //   really ought to be answered by the stakeholder.
+    // * Can you dispute a chargeback or resolution? Probably not.
+    //
+    // * What happens if the client ID on the dispute message does not match the client ID on the transaction?
+    //   - We should probably abort, on the assumption that it's invalid data.
+    debug!("Found a Dispute.");
+    // We check the customer first because, if the customer
+    // does not exist, than the associated transaction
+    // probably doesn't, either.
+    if !result.contains_key(&record.client) {
+        info!("Dispute: Cannot Dispute Transaction for Nonexistant Customer");
+        failed_transactions.push((
+            record.clone(),
+            TransactionError::CannotDisputeTransactionForNonexistantCustomer,
+        ));
+        return;
+    }
+    if transaction_id_is_new(&record.tx, transaction_ledger) {
+        // We're trying to dispute a non-existant transaction.
+        info!("Dispute: Cannot Dispute Non-existant Transaction.");
+        failed_transactions.push((
+            record.clone(),
+            TransactionError::CannotDisputeNonexistantTransaction,
+        ));
+        return;
+    }
+    if transaction_ledger.get(&record.tx).unwrap().client != record.client {
+        // The client ID on the incoming request does not
+        // match the client ID of the transaction it referrs
+        // to. Assume that this is a malformed request and
+        // refuse to process it.
+        info!("Dispute: Transaction Client ID does not match record Client ID.");
+        failed_transactions.push((
+            record.clone(),
+            TransactionError::DisputeTransactionClientIDDoesNotMatchRequestClientID,
+        ))
+    }
+    if transaction_ledger.get(&record.tx).unwrap().is_disputed {
+        info!("Dispute: Cannot Dispute Already Disputed Transaction.");
+        failed_transactions.push((
+            record.clone(),
+            TransactionError::CannotDisputeAlreadyDisputedTransaction,
+        ));
+        return;
+    }
+    // What should we do in the case of a locked account?
+    debug!("Dispute: Processing Dispute.");
+    let transaction_amount = get_transaction_amount(&record.tx, transaction_ledger);
+    result.entry(record.client).and_modify(|client_data| {
+        client_data.available -= transaction_amount;
+        client_data.held += transaction_amount;
+    });
+}
+
+fn process_resolve(
+    record: &LedgerEntry,
+    result: &mut HashMap<u16, AccountInfo>,
+    transaction_ledger: &mut HashMap<u32, LedgerEntry>,
+    failed_transactions: &mut Vec<(LedgerEntry, TransactionError)>,
+) {
+    debug!("Found a Resolve.");
+    if !result.contains_key(&record.client) {
+        info!("Resolve: Cannot Resolve Transaction for Nonexistant Customer.");
+        failed_transactions.push((
+            record.clone(),
+            TransactionError::CannotResolveTransactionForNonexistantCustomer,
+        ));
+        return;
+    }
+    if transaction_id_is_new(&record.tx, transaction_ledger) {
+        // We're trying to resolve a non-existant transaction.
+        info!("Resolve: Cannot Resolve Non-existant Transaction.");
+        failed_transactions.push((
+            record.clone(),
+            TransactionError::CannotResolveNonexistantTransaction,
+        ));
+        return;
+    }
+
+    if transaction_ledger.get(&record.tx).unwrap().client != record.client {
+        // The client ID on the incoming request does not
+        // match the client ID of the transaction it referrs
+        // to. Assume that this is a malformed request and
+        // refuse to process it.
+        info!("Resolve: Transaction Client ID does not match record Client ID.");
+        failed_transactions.push((
+            record.clone(),
+            TransactionError::ResolveTransactionClientIDDoesNotMatchRequestClientID,
+        ))
+    }
+
+    if !transaction_ledger.get(&record.tx).unwrap().is_disputed {
+        info!("Resolve: Cannot Resolve Undisputed Transaction.");
+        failed_transactions.push((
+            record.clone(),
+            TransactionError::CannotResolveUndisputedTransaction,
+        ));
+        return;
+    }
+    // What should we do in the case of a locked account?
+    let transaction_amount = get_transaction_amount(&record.tx, transaction_ledger);
+    result.entry(record.client).and_modify(|client_data| {
+        client_data.available += transaction_amount;
+        client_data.held -= transaction_amount;
+    });
+}
+
+fn process_chargeback(
+    record: &LedgerEntry,
+    result: &mut HashMap<u16, AccountInfo>,
+    transaction_ledger: &mut HashMap<u32, LedgerEntry>,
+    failed_transactions: &mut Vec<(LedgerEntry, TransactionError)>,
+) {
+    debug!("Found a Chargeback.");
+    if !result.contains_key(&record.client) {
+        info!("Chargeback: Cannot Chargeback Transaction For Non-Existant Customer.");
+        failed_transactions.push((
+            record.clone(),
+            TransactionError::CannotChargebackTransactionForNonexistantCustomer,
+        ));
+        return;
+    }
+
+    if transaction_id_is_new(&record.tx, transaction_ledger) {
+        // We're trying to chargeback a non-existant transaction.
+        info!("Chargeback: Cannot Chargeback a Non-existant Transaction.");
+        failed_transactions.push((
+            record.clone(),
+            TransactionError::CannotChargebackNonexistantTransaction,
+        ));
+        return;
+    }
+
+    if transaction_ledger.get(&record.tx).unwrap().client != record.client {
+        // The client ID on the incoming request does not
+        // match the client ID of the transaction it referrs
+        // to. Assume that this is a malformed request and
+        // refuse to process it.
+        info!("Chargeback: Transaction Client ID does not match record Client ID.");
+        failed_transactions.push((
+            record.clone(),
+            TransactionError::ChargebackTransactionClientIDDoesNotMatchRequestClientID,
+        ))
+    }
+
+    if !transaction_ledger.get(&record.tx).unwrap().is_disputed {
+        info!("Chargeback: Cannot Chargeback Undisputed Transaction.");
+        failed_transactions.push((
+            record.clone(),
+            TransactionError::CannotChargebackUndisputedTransaction,
+        ));
+        return;
+    }
+
+    // Note that, while you cannot deposit or withdraw from a
+    // locked acocunt, you most certainly can and should be
+    // able to chargeback from such an account. In fact, if
+    // someone is guilty of serial fraud, such a circumstance
+    // is quite likely. As such, there's no check if the
+    // account is already locked.
+    let transaction_amount = get_transaction_amount(&record.tx, transaction_ledger);
+    result.entry(record.client).and_modify(|client_data| {
+        client_data.held -= transaction_amount;
+        client_data.locked = true;
+    });
 }
 
 fn get_transaction_amount(tx: &u32, transaction_ledger: &HashMap<u32, LedgerEntry>) -> f32 {
