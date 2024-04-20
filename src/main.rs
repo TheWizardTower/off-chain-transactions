@@ -99,7 +99,7 @@ pub async fn main() -> Result<()> {
     info!("Hello, world!");
 
     let args: Vec<_> = std::env::args().collect();
-    let filename = match args.get(2) {
+    let filename = match args.get(1) {
         None => {
             // error!("Require filename to read in as an argument.");
             // std::process::exit(-1);
