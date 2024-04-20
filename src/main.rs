@@ -8,8 +8,8 @@ use tokio_stream::StreamExt;
 
 #[derive(Clone, Debug, serde::Deserialize, PartialEq)]
 struct AccountInfo {
-    available: f32, // Available for use.
-    held: f32,      // Held because of a disputed charge.
+    available: f64, // Available for use.
+    held: f64,      // Held because of a disputed charge.
     locked: bool,   // Has been locked because of a chargeback.
 }
 
@@ -26,9 +26,9 @@ impl Default for AccountInfo {
 #[derive(Clone, Debug, serde::Deserialize, serde::Serialize, PartialEq)]
 struct AccountInfoWithTotal {
     client: u16,
-    available: f32,
-    held: f32,
-    total: f32,
+    available: f64,
+    held: f64,
+    total: f64,
     locked: bool,
 }
 
@@ -48,7 +48,7 @@ struct LedgerEntry {
     tx_type: TransactionType, // Transaction Type. Will be with header name 'type', which is unfortunately a reserved word in rust.
     client: u16,         // Client ID
     tx: u32,             // Transaction ID
-    amount: Option<f32>, // At least four decimal places of precision is expected. Not present on every type of transaction.
+    amount: Option<f64>, // At least four decimal places of precision is expected. Not present on every type of transaction.
     #[serde(skip)]
     #[serde(default = "disputed_default")]
     is_disputed: bool,
@@ -62,8 +62,8 @@ fn disputed_default() -> bool {
 #[serde(rename_all = "lowercase")]
 #[serde(tag = "type")]
 enum LedgerEntryEnum {
-    Deposit { client: u16, tx: u32, amount: f32 },
-    Withdrawal { client: u16, tx: u32, amount: f32 },
+    Deposit { client: u16, tx: u32, amount: f64 },
+    Withdrawal { client: u16, tx: u32, amount: f64 },
     Dispute { client: u16, tx: u32 },
     Resolve { client: u16, tx: u32 },
     Chargeback { client: u16, tx: u32 },
@@ -459,7 +459,7 @@ fn process_chargeback(
     });
 }
 
-fn get_transaction_amount(tx: &u32, transaction_ledger: &HashMap<u32, LedgerEntry>) -> f32 {
+fn get_transaction_amount(tx: &u32, transaction_ledger: &HashMap<u32, LedgerEntry>) -> f64 {
     transaction_ledger.get(tx).unwrap().amount.unwrap()
 }
 
