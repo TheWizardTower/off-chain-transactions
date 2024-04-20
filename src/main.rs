@@ -1,37 +1,59 @@
 use anyhow::Result;
 use log::{debug, info};
+use rust_decimal::prelude::*;
+use rust_decimal_macros::dec;
 use std::collections::HashMap;
 use std::path::Path;
 use tokio::fs::File;
 use tokio::io;
 use tokio_stream::StreamExt;
 
+// Struct for storing account information as we process transactions.
+// We choose *not* to record Total, as keeping track of that is
+// inviting opportunities for both rounding error (mitigated by the
+// Decimal type) and more importantly, is the sort of thing you'd
+// forget to do as you're refactoring, bugfixing, or extending code.
+// So, track available and held, and then when we render the ledger at
+// the end, calculate total as available + held.
+//
+// Additionally, we're storing this in a HashMap of u16 to
+// AccountInfo. The u16 of course represents the customer ID, and
+// putting it in a hash map encodes an invariant (every customer shall
+// have only one account) into our data structures nicely. It's also
+// something we can easily re-render into an AccountInfoWithTotal at
+// the end of processing.
 #[derive(Clone, Debug, serde::Deserialize, PartialEq)]
 struct AccountInfo {
-    available: f64, // Available for use.
-    held: f64,      // Held because of a disputed charge.
-    locked: bool,   // Has been locked because of a chargeback.
+    available: Decimal, // Available for use.
+    held: Decimal,      // Held because of a disputed charge.
+    locked: bool,       // Has been locked because of a chargeback.
 }
 
 impl Default for AccountInfo {
     fn default() -> Self {
         AccountInfo {
-            available: 0.0,
-            held: 0.0,
+            available: dec!(0.0),
+            held: dec!(0.0),
             locked: false,
         }
     }
 }
 
+// We use this type to render nice CSV via serde and csv_async at the
+// end. We're using the above struct for in-flight bookkeeping.
 #[derive(Clone, Debug, serde::Deserialize, serde::Serialize, PartialEq)]
 struct AccountInfoWithTotal {
     client: u16,
-    available: f64,
-    held: f64,
-    total: f64,
+    available: Decimal,
+    held: Decimal,
+    total: Decimal,
     locked: bool,
 }
 
+// Create a sum type for the types of transactions we can process.
+// We're also doing some serde footwork to make it so we get nice
+// Rust-format names while still accepting 'deposit' and so forth in
+// the actual CSV files.
 #[derive(Clone, Debug, serde::Deserialize, PartialEq)]
 #[serde(rename_all = "lowercase")]
 enum TransactionType {
@@ -42,31 +64,67 @@ enum TransactionType {
     Chargeback,
 }
 
+#[derive(Clone, Debug, PartialEq)]
+enum TransactionStatus {
+    Undisputed,
+    Disputed,
+    Chargebacked,
+}
+
+// The struct we serialize transaction rows into. We have to massage
+// this a fair bit to have it line up with the CSV we slurp in, and we
+// change it a bit to support recording if a transaction has been
+// disputed or not.
+//
+// First off, we have to rename the `type` field to tx_type, since
+// type is of course a reserved word in Rust, so it can't be a struct
+// field name. Second, we add an is_disputed field that is not present
+// in the CSV, so we can update which transactions have been disputed,
+// resolved (i.e., back to 'undisputed'), or chargebacked. If a
+// transaction has been chargebacked, it stays there permanently, it
+// is not subject to further dispute or resolution.
 #[derive(Clone, Debug, serde::Deserialize, PartialEq)]
 struct LedgerEntry {
     #[serde(rename(serialize = "type", deserialize = "type"))]
     tx_type: TransactionType, // Transaction Type. Will be with header name 'type', which is unfortunately a reserved word in rust.
-    client: u16,         // Client ID
-    tx: u32,             // Transaction ID
-    amount: Option<f64>, // At least four decimal places of precision is expected. Not present on every type of transaction.
+    client: u16,             // Client ID
+    tx: u32,                 // Transaction ID
+    amount: Option<Decimal>, // At least four decimal places of precision is expected. Not present on every type of transaction.
     #[serde(skip)]
     #[serde(default = "disputed_default")]
-    is_disputed: bool,
+    disputed_status: TransactionStatus,
 }
 
-fn disputed_default() -> bool {
-    false
+fn disputed_default() -> TransactionStatus {
+    TransactionStatus::Undisputed
 }
 
 #[derive(Clone, Debug, serde::Deserialize, serde::Serialize, PartialEq)]
 #[serde(rename_all = "lowercase")]
 #[serde(tag = "type")]
 enum LedgerEntryEnum {
-    Deposit { client: u16, tx: u32, amount: f64 },
-    Withdrawal { client: u16, tx: u32, amount: f64 },
-    Dispute { client: u16, tx: u32 },
-    Resolve { client: u16, tx: u32 },
-    Chargeback { client: u16, tx: u32 },
+    Deposit {
+        client: u16,
+        tx: u32,
+        amount: Decimal,
+    },
+    Withdrawal {
+        client: u16,
+        tx: u32,
+        amount: Decimal,
+    },
+    Dispute {
+        client: u16,
+        tx: u32,
+    },
+    Resolve {
+        client: u16,
+        tx: u32,
+    },
+    Chargeback {
+        client: u16,
+        tx: u32,
+    },
 }
 
 #[derive(Debug, PartialEq)]
@@ -86,10 +144,12 @@ enum TransactionError {
     CannotChargebackUndisputedTransaction,
     CannotDepoistIntoLockedAccount,
     CannotWithdrawFromLockedAccount,
-
     DisputeTransactionClientIDDoesNotMatchRequestClientID,
     ResolveTransactionClientIDDoesNotMatchRequestClientID,
     ChargebackTransactionClientIDDoesNotMatchRequestClientID,
+    CannotChargebackAlreadyChargebackedTransaction,
+    CannotResolveChargebackedTransaction,
+    CannotDisputeAlreadyChargebackedTransaction,
 }
 
 #[tokio::main]
@@ -327,7 +387,7 @@ fn process_dispute(
         ));
         return;
     }
-    if transaction_ledger.get(&record.tx).unwrap().is_disputed {
+    if transaction_ledger.get(&record.tx).unwrap().disputed_status == TransactionStatus::Disputed {
         info!("Dispute: Cannot Dispute Already Disputed Transaction.");
         failed_transactions.push((
             record.clone(),
@@ -335,6 +395,18 @@ fn process_dispute(
         ));
         return;
     }
+
+    if transaction_ledger.get(&record.tx).unwrap().disputed_status
+        == TransactionStatus::Chargebacked
+    {
+        info!("Dispute: Cannot Dispute Already Disputed Transaction.");
+        failed_transactions.push((
+            record.clone(),
+            TransactionError::CannotDisputeAlreadyChargebackedTransaction,
+        ));
+        return;
+    }
+
     // What should we do in the case of a locked account?
     debug!("Dispute: Processing Dispute.");
     let transaction_amount = get_transaction_amount(&record.tx, transaction_ledger);
@@ -342,6 +414,9 @@ fn process_dispute(
         client_data.available -= transaction_amount;
         client_data.held += transaction_amount;
     });
+    transaction_ledger
+        .entry(record.tx)
+        .and_modify(|entry| entry.disputed_status = TransactionStatus::Disputed);
 }
 
 fn process_resolve(
@@ -382,7 +457,8 @@ fn process_resolve(
         return;
     }
 
-    if !transaction_ledger.get(&record.tx).unwrap().is_disputed {
+    if transaction_ledger.get(&record.tx).unwrap().disputed_status == TransactionStatus::Undisputed
+    {
         info!("Resolve: Cannot Resolve Undisputed Transaction.");
         failed_transactions.push((
             record.clone(),
@@ -390,12 +466,27 @@ fn process_resolve(
         ));
         return;
     }
+
+    if transaction_ledger.get(&record.tx).unwrap().disputed_status
+        == TransactionStatus::Chargebacked
+    {
+        info!("Resolve: Cannot Resolve Undisputed Transaction.");
+        failed_transactions.push((
+            record.clone(),
+            TransactionError::CannotResolveChargebackedTransaction,
+        ));
+        return;
+    }
+
     // What should we do in the case of a locked account?
     let transaction_amount = get_transaction_amount(&record.tx, transaction_ledger);
     result.entry(record.client).and_modify(|client_data| {
         client_data.available += transaction_amount;
         client_data.held -= transaction_amount;
     });
+    transaction_ledger
+        .entry(record.tx)
+        .and_modify(|entry| entry.disputed_status = TransactionStatus::Undisputed);
 }
 
 fn process_chargeback(
@@ -437,11 +528,23 @@ fn process_chargeback(
         return;
     }
 
-    if !transaction_ledger.get(&record.tx).unwrap().is_disputed {
+    if transaction_ledger.get(&record.tx).unwrap().disputed_status == TransactionStatus::Undisputed
+    {
         info!("Chargeback: Cannot Chargeback Undisputed Transaction.");
         failed_transactions.push((
             record.clone(),
             TransactionError::CannotChargebackUndisputedTransaction,
+        ));
+        return;
+    }
+
+    if transaction_ledger.get(&record.tx).unwrap().disputed_status
+        == TransactionStatus::Chargebacked
+    {
+        info!("Chargeback: Cannot Chargeback Undisputed Transaction.");
+        failed_transactions.push((
+            record.clone(),
+            TransactionError::CannotChargebackAlreadyChargebackedTransaction,
         ));
         return;
     }
@@ -457,9 +560,13 @@ fn process_chargeback(
         client_data.held -= transaction_amount;
         client_data.locked = true;
     });
+
+    transaction_ledger
+        .entry(record.tx)
+        .and_modify(|entry| entry.disputed_status = TransactionStatus::Chargebacked);
 }
 
-fn get_transaction_amount(tx: &u32, transaction_ledger: &HashMap<u32, LedgerEntry>) -> f64 {
+fn get_transaction_amount(tx: &u32, transaction_ledger: &HashMap<u32, LedgerEntry>) -> Decimal {
     transaction_ledger.get(tx).unwrap().amount.unwrap()
 }
 
@@ -490,7 +597,7 @@ mod tests {
             client: 1,
             tx: 1,
             amount: None,
-            is_disputed: false,
+            disputed_status: TransactionStatus::Undisputed,
         };
 
         process_transaction(
@@ -522,7 +629,7 @@ mod tests {
             client: 1,
             tx: 1,
             amount: None,
-            is_disputed: false,
+            disputed_status: TransactionStatus::Undisputed,
         };
 
         process_transaction(
@@ -554,7 +661,7 @@ mod tests {
             client: 1,
             tx: 1,
             amount: None,
-            is_disputed: false,
+            disputed_status: TransactionStatus::Undisputed,
         };
 
         process_transaction(
@@ -586,7 +693,7 @@ mod tests {
             client: 1,
             tx: 1,
             amount: None,
-            is_disputed: false,
+            disputed_status: TransactionStatus::Undisputed,
         };
 
         process_transaction(
@@ -618,7 +725,7 @@ mod tests {
             client: 1,
             tx: 1,
             amount: None,
-            is_disputed: false,
+            disputed_status: TransactionStatus::Undisputed,
         };
 
         process_transaction(
@@ -650,7 +757,7 @@ mod tests {
             client: 1,
             tx: 1,
             amount: None,
-            is_disputed: false,
+            disputed_status: TransactionStatus::Undisputed,
         };
 
         process_transaction(
@@ -676,24 +783,24 @@ mod tests {
             (
                 1,
                 AccountInfo {
-                    available: 50.0,
-                    held: 0.0,
+                    available: dec!(50.0),
+                    held: dec!(0.0),
                     locked: false,
                 },
             ),
             (
                 2,
                 AccountInfo {
-                    available: 0.0,
-                    held: 0.0,
+                    available: dec!(0.0),
+                    held: dec!(0.0),
                     locked: true,
                 },
             ),
             (
                 3,
                 AccountInfo {
-                    available: 500.0,
-                    held: 100.0,
+                    available: dec!(500.0),
+                    held: dec!(100.0),
                     locked: false,
                 },
             ),
@@ -710,8 +817,8 @@ mod tests {
             tx_type: TransactionType::Deposit,
             client: 1,
             tx: 1,
-            amount: Some(50.0),
-            is_disputed: false,
+            amount: Some(dec!(50.0)),
+            disputed_status: TransactionStatus::Undisputed,
         };
 
         process_transaction(
@@ -728,8 +835,8 @@ mod tests {
             HashMap::from([(
                 1,
                 AccountInfo {
-                    available: 50.0,
-                    held: 0.0,
+                    available: dec!(50.0),
+                    held: dec!(0.0),
                     locked: false
                 }
             )])
@@ -747,7 +854,7 @@ mod tests {
             client: 1,
             tx: 1,
             amount: None,
-            is_disputed: false,
+            disputed_status: TransactionStatus::Undisputed,
         };
 
         process_transaction(
@@ -776,7 +883,7 @@ mod tests {
             client: 1,
             tx: 1,
             amount: None,
-            is_disputed: false,
+            disputed_status: TransactionStatus::Undisputed,
         };
 
         process_transaction(
@@ -799,7 +906,7 @@ mod tests {
         let mut expected_result = get_default_ledger();
         expected_result
             .entry(1)
-            .and_modify(|client_info| client_info.available += 50.0);
+            .and_modify(|client_info| client_info.available += dec!(50.0));
         let mut transaction_ledger: HashMap<u32, LedgerEntry> = HashMap::from([]);
         let mut failed_transactions: Vec<(LedgerEntry, TransactionError)> = vec![];
 
@@ -807,8 +914,8 @@ mod tests {
             tx_type: TransactionType::Deposit,
             client: 1,
             tx: 1,
-            amount: Some(50.0),
-            is_disputed: false,
+            amount: Some(dec!(50.0)),
+            disputed_status: TransactionStatus::Undisputed,
         };
 
         process_transaction(
@@ -834,8 +941,8 @@ mod tests {
             tx_type: TransactionType::Deposit,
             client: 2,
             tx: 1,
-            amount: Some(50.0),
-            is_disputed: false,
+            amount: Some(dec!(50.0)),
+            disputed_status: TransactionStatus::Undisputed,
         };
 
         let expected_failed_transactions = vec![(
@@ -864,8 +971,8 @@ mod tests {
             tx_type: TransactionType::Deposit,
             client: 1,
             tx: 1,
-            amount: Some(50.0),
-            is_disputed: false,
+            amount: Some(dec!(50.0)),
+            disputed_status: TransactionStatus::Undisputed,
         };
 
         let mut transaction_ledger: HashMap<u32, LedgerEntry> =
@@ -896,8 +1003,8 @@ mod tests {
             tx_type: TransactionType::Withdrawal,
             client: 1,
             tx: 1,
-            amount: Some(50.0),
-            is_disputed: false,
+            amount: Some(dec!(50.0)),
+            disputed_status: TransactionStatus::Undisputed,
         };
 
         let mut transaction_ledger: HashMap<u32, LedgerEntry> =
@@ -928,8 +1035,8 @@ mod tests {
             tx_type: TransactionType::Withdrawal,
             client: 1,
             tx: 1,
-            amount: Some(50_000.0),
-            is_disputed: false,
+            amount: Some(dec!(50_000.0)),
+            disputed_status: TransactionStatus::Undisputed,
         };
 
         let mut transaction_ledger: HashMap<u32, LedgerEntry> = HashMap::from([]);
@@ -961,8 +1068,8 @@ mod tests {
             tx_type: TransactionType::Withdrawal,
             client: 2,
             tx: 1,
-            amount: Some(50.0),
-            is_disputed: false,
+            amount: Some(dec!(50.0)),
+            disputed_status: TransactionStatus::Undisputed,
         };
 
         let expected_failed_transactions = vec![(
@@ -993,8 +1100,8 @@ mod tests {
             tx_type: TransactionType::Withdrawal,
             client: 5,
             tx: 1,
-            amount: Some(50.0),
-            is_disputed: false,
+            amount: Some(dec!(50.0)),
+            disputed_status: TransactionStatus::Undisputed,
         };
 
         let expected_failed_transactions = vec![(
@@ -1026,7 +1133,7 @@ mod tests {
             client: 5,
             tx: 1,
             amount: None,
-            is_disputed: false,
+            disputed_status: TransactionStatus::Undisputed,
         };
 
         let expected_failed_transactions = vec![(
@@ -1054,8 +1161,8 @@ mod tests {
                     tx_type: TransactionType::Withdrawal,
                     client: 1,
                     tx: 1,
-                    amount: Some(50.0),
-                    is_disputed: false,
+                    amount: Some(dec!(50.0)),
+                    disputed_status: TransactionStatus::Undisputed,
                 },
             ),
             (
@@ -1065,7 +1172,7 @@ mod tests {
                     client: 1,
                     tx: 2,
                     amount: None,
-                    is_disputed: true,
+                    disputed_status: TransactionStatus::Disputed,
                 },
             ),
             (
@@ -1075,7 +1182,17 @@ mod tests {
                     client: 1,
                     tx: 2,
                     amount: None,
-                    is_disputed: false,
+                    disputed_status: TransactionStatus::Undisputed,
+                },
+            ),
+            (
+                4,
+                LedgerEntry {
+                    tx_type: TransactionType::Dispute,
+                    client: 3,
+                    tx: 4,
+                    amount: Some(dec!(50.0)),
+                    disputed_status: TransactionStatus::Disputed,
                 },
             ),
         ])
@@ -1091,7 +1208,7 @@ mod tests {
             client: 1,
             tx: 2,
             amount: None,
-            is_disputed: false,
+            disputed_status: TransactionStatus::Undisputed,
         };
 
         let mut transaction_ledger: HashMap<u32, LedgerEntry> = get_default_transactions();
@@ -1124,7 +1241,7 @@ mod tests {
             client: 1,
             tx: 1,
             amount: None,
-            is_disputed: false,
+            disputed_status: TransactionStatus::Undisputed,
         };
 
         let mut transaction_ledger: HashMap<u32, LedgerEntry> = get_default_transactions();
@@ -1157,7 +1274,7 @@ mod tests {
             client: 1,
             tx: 1,
             amount: None,
-            is_disputed: false,
+            disputed_status: TransactionStatus::Undisputed,
         };
 
         let mut transaction_ledger: HashMap<u32, LedgerEntry> = get_default_transactions();
@@ -1190,7 +1307,7 @@ mod tests {
             client: 2,
             tx: 1,
             amount: None,
-            is_disputed: false,
+            disputed_status: TransactionStatus::Undisputed,
         };
 
         let mut transaction_ledger: HashMap<u32, LedgerEntry> = get_default_transactions();
@@ -1223,7 +1340,7 @@ mod tests {
             client: 2,
             tx: 1,
             amount: None,
-            is_disputed: false,
+            disputed_status: TransactionStatus::Undisputed,
         };
 
         let mut transaction_ledger: HashMap<u32, LedgerEntry> = get_default_transactions();
@@ -1256,7 +1373,7 @@ mod tests {
             client: 2,
             tx: 1,
             amount: None,
-            is_disputed: false,
+            disputed_status: TransactionStatus::Undisputed,
         };
 
         let mut transaction_ledger: HashMap<u32, LedgerEntry> = get_default_transactions();
@@ -1279,6 +1396,117 @@ mod tests {
         assert_eq!(transaction_ledger, expected_transaction_ledger);
     }
 
+    #[test]
+    fn test_successful_dispute() {
+        let mut result = get_default_ledger();
+        let mut expected_result = get_default_ledger();
+        expected_result.entry(1).and_modify(|client_info| {
+            client_info.available = dec!(0.0);
+            client_info.held = dec!(50.0);
+        });
+
+        let record = LedgerEntry {
+            tx_type: TransactionType::Dispute,
+            client: 1,
+            tx: 1,
+            amount: None,
+            disputed_status: TransactionStatus::Undisputed,
+        };
+
+        let mut transaction_ledger: HashMap<u32, LedgerEntry> = get_default_transactions();
+        let mut expected_transaction_ledger: HashMap<u32, LedgerEntry> = get_default_transactions();
+        expected_transaction_ledger
+            .entry(1)
+            .and_modify(|entry| entry.disputed_status = TransactionStatus::Disputed);
+        let mut failed_transactions: Vec<(LedgerEntry, TransactionError)> = vec![];
+        let expected_failed_transactions = vec![];
+
+        process_transaction(
+            &record,
+            &mut result,
+            &mut transaction_ledger,
+            &mut failed_transactions,
+        );
+
+        assert_eq!(failed_transactions, expected_failed_transactions);
+        assert_eq!(result, expected_result);
+        assert_eq!(transaction_ledger, expected_transaction_ledger);
+    }
+
+    #[test]
+    fn test_successful_resolution() {
+        let mut result = get_default_ledger();
+        let mut expected_result = get_default_ledger();
+        expected_result.entry(3).and_modify(|client_info| {
+            client_info.available += dec!(50.0);
+            client_info.held -= dec!(50.0);
+        });
+
+        let record = LedgerEntry {
+            tx_type: TransactionType::Resolve,
+            client: 3,
+            tx: 4,
+            amount: None,
+            disputed_status: TransactionStatus::Undisputed,
+        };
+
+        let mut transaction_ledger: HashMap<u32, LedgerEntry> = get_default_transactions();
+        let mut expected_transaction_ledger: HashMap<u32, LedgerEntry> = get_default_transactions();
+        expected_transaction_ledger
+            .entry(4)
+            .and_modify(|entry| entry.disputed_status = TransactionStatus::Undisputed);
+        let mut failed_transactions: Vec<(LedgerEntry, TransactionError)> = vec![];
+        let expected_failed_transactions = vec![];
+
+        process_transaction(
+            &record,
+            &mut result,
+            &mut transaction_ledger,
+            &mut failed_transactions,
+        );
+
+        assert_eq!(failed_transactions, expected_failed_transactions);
+        assert_eq!(result, expected_result);
+        assert_eq!(transaction_ledger, expected_transaction_ledger);
+    }
+
+    #[test]
+    fn test_successful_chargeback() {
+        let mut result = get_default_ledger();
+        let mut expected_result = get_default_ledger();
+        expected_result.entry(3).and_modify(|client_info| {
+            client_info.held -= dec!(50.0);
+            client_info.locked = true;
+        });
+
+        let record = LedgerEntry {
+            tx_type: TransactionType::Chargeback,
+            client: 3,
+            tx: 4,
+            amount: None,
+            disputed_status: TransactionStatus::Undisputed,
+        };
+
+        let mut transaction_ledger: HashMap<u32, LedgerEntry> = get_default_transactions();
+        let mut expected_transaction_ledger: HashMap<u32, LedgerEntry> = get_default_transactions();
+        expected_transaction_ledger.entry(4).and_modify(|entry| {
+            entry.disputed_status = TransactionStatus::Chargebacked;
+        });
+        let mut failed_transactions: Vec<(LedgerEntry, TransactionError)> = vec![];
+        let expected_failed_transactions = vec![];
+
+        process_transaction(
+            &record,
+            &mut result,
+            &mut transaction_ledger,
+            &mut failed_transactions,
+        );
+
+        assert_eq!(failed_transactions, expected_failed_transactions);
+        assert_eq!(result, expected_result);
+        assert_eq!(transaction_ledger, expected_transaction_ledger);
+    }
+
     #[tokio::test]
     async fn test_whitespace_deposits() -> Result<()> {
         let ledger = process_transactions("src/deposit.csv").await?;
@@ -1288,32 +1516,32 @@ mod tests {
                 (
                     1,
                     AccountInfo {
-                        available: 500.0,
-                        held: 0.0,
+                        available: dec!(500.0),
+                        held: dec!(0.0),
                         locked: false,
                     },
                 ),
                 (
                     2,
                     AccountInfo {
-                        available: 600.0,
-                        held: 0.0,
+                        available: dec!(600.0),
+                        held: dec!(0.0),
                         locked: false,
                     },
                 ),
                 (
                     3,
                     AccountInfo {
-                        available: 1000.0,
-                        held: 0.0,
+                        available: dec!(1000.0),
+                        held: dec!(0.0),
                         locked: false,
                     },
                 ),
                 (
                     4,
                     AccountInfo {
-                        available: 10_000.0,
-                        held: 0.0,
+                        available: dec!(10_000.0),
+                        held: dec!(0.0),
                         locked: false,
                     },
                 ),
@@ -1331,8 +1559,8 @@ mod tests {
             HashMap::from([(
                 1,
                 AccountInfo {
-                    available: 50_000_000.00,
-                    held: 0.0,
+                    available: dec!(50_000_000.00),
+                    held: dec!(0.0),
                     locked: false,
                 }
             )])
@@ -1340,4 +1568,30 @@ mod tests {
 
         Ok(())
     }
+
+    // Why have this test if we already have a 1m row test? Making
+    // sure we can get up into 50b in available without losing
+    // precision is very valuable. As floating-point gets larger, it
+    // loses precision, so we're making sure we're getting
+    // value-for-money (as spent as cognitive overhead and build time)
+    // for the types we're using.
+    #[tokio::test]
+    async fn test_million_rows_large_transactions() -> Result<()> {
+        let ledger = process_transactions("src/1m_rows_large_transactions.csv").await?;
+        assert_eq!(
+            ledger,
+            HashMap::from([(
+                1,
+                AccountInfo {
+                    available: dec!(50_000_000_000.00),
+                    held: dec!(0.0),
+                    locked: false,
+                }
+            )])
+        );
+
+        Ok(())
+    }
+
+    // CannotChargebackAlreadyChargebackedTransaction
 }
