@@ -86,6 +86,10 @@ enum TransactionError {
     CannotChargebackUndisputedTransaction,
     CannotDepoistIntoLockedAccount,
     CannotWithdrawFromLockedAccount,
+
+    DisputeTransactionClientIDDoesNotMatchRequestClientID,
+    ResolveTransactionClientIDDoesNotMatchRequestClientID,
+    ChargebackTransactionClientIDDoesNotMatchRequestClientID,
 }
 
 #[tokio::main]
