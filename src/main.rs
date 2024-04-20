@@ -324,7 +324,8 @@ fn process_dispute(
         failed_transactions.push((
             record.clone(),
             TransactionError::DisputeTransactionClientIDDoesNotMatchRequestClientID,
-        ))
+        ));
+        return;
     }
     if transaction_ledger.get(&record.tx).unwrap().is_disputed {
         info!("Dispute: Cannot Dispute Already Disputed Transaction.");
@@ -377,7 +378,8 @@ fn process_resolve(
         failed_transactions.push((
             record.clone(),
             TransactionError::ResolveTransactionClientIDDoesNotMatchRequestClientID,
-        ))
+        ));
+        return;
     }
 
     if !transaction_ledger.get(&record.tx).unwrap().is_disputed {
@@ -431,7 +433,8 @@ fn process_chargeback(
         failed_transactions.push((
             record.clone(),
             TransactionError::ChargebackTransactionClientIDDoesNotMatchRequestClientID,
-        ))
+        ));
+        return;
     }
 
     if !transaction_ledger.get(&record.tx).unwrap().is_disputed {
