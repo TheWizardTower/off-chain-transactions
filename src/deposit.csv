@@ -1,0 +1,5 @@
+type,client,tx,amount
+deposit, 1, 1, 500
+deposit , 2, 2 , 600
+deposit    , 3,    3    , 1000
+	deposit ,4 , 4 , 10000

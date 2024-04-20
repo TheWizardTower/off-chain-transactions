@@ -1278,4 +1278,48 @@ mod tests {
         assert_eq!(result, expected_result);
         assert_eq!(transaction_ledger, expected_transaction_ledger);
     }
+
+    #[tokio::test]
+    async fn test_whitespace_deposits() -> Result<()> {
+        let ledger = process_transactions("src/deposit.csv").await?;
+        assert_eq!(
+            ledger,
+            HashMap::from([
+                (
+                    1,
+                    AccountInfo {
+                        available: 500.0,
+                        held: 0.0,
+                        locked: false,
+                    },
+                ),
+                (
+                    2,
+                    AccountInfo {
+                        available: 600.0,
+                        held: 0.0,
+                        locked: false,
+                    },
+                ),
+                (
+                    3,
+                    AccountInfo {
+                        available: 1000.0,
+                        held: 0.0,
+                        locked: false,
+                    },
+                ),
+                (
+                    4,
+                    AccountInfo {
+                        available: 10_000.0,
+                        held: 0.0,
+                        locked: false,
+                    },
+                ),
+            ]),
+        );
+
+        Ok(())
+    }
 }
