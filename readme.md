@@ -48,3 +48,4 @@ deserialize CSV data, and decimal to keep track of decimal numbers
 with precision. We also use the `anyhow` crate to provide a convenient
 `Result<T>` type.
 
+Also available are sample input/output. The input is the `transactions.csv` file, and the expected output is the `output.csv`, both in the root of this repository.
