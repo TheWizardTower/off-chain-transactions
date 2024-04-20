@@ -1042,4 +1042,139 @@ mod tests {
         assert_eq!(result, expected_result);
         assert_eq!(transaction_ledger, HashMap::from([]));
     }
+
+    fn get_default_transactions() -> HashMap<u32, LedgerEntry> {
+        HashMap::from([
+            (
+                1,
+                LedgerEntry {
+                    tx_type: TransactionType::Withdrawal,
+                    client: 1,
+                    tx: 1,
+                    amount: Some(50.0),
+                    is_disputed: false,
+                },
+            ),
+            (
+                2,
+                LedgerEntry {
+                    tx_type: TransactionType::Deposit,
+                    client: 1,
+                    tx: 2,
+                    amount: None,
+                    is_disputed: true,
+                },
+            ),
+            (
+                3,
+                LedgerEntry {
+                    tx_type: TransactionType::Dispute,
+                    client: 1,
+                    tx: 2,
+                    amount: None,
+                    is_disputed: false,
+                },
+            ),
+        ])
+    }
+
+    #[test]
+    fn test_dispute_already_disputed_transaction() {
+        let mut result = get_default_ledger();
+        let expected_result = get_default_ledger();
+
+        let record = LedgerEntry {
+            tx_type: TransactionType::Dispute,
+            client: 1,
+            tx: 2,
+            amount: None,
+            is_disputed: false,
+        };
+
+        let mut transaction_ledger: HashMap<u32, LedgerEntry> = get_default_transactions();
+        let expected_transaction_ledger: HashMap<u32, LedgerEntry> = get_default_transactions();
+        let mut failed_transactions: Vec<(LedgerEntry, TransactionError)> = vec![];
+        let expected_failed_transactions = vec![(
+            record.clone(),
+            TransactionError::CannotDisputeAlreadyDisputedTransaction,
+        )];
+
+        process_transaction(
+            &record,
+            &mut result,
+            &mut transaction_ledger,
+            &mut failed_transactions,
+        );
+
+        assert_eq!(failed_transactions, expected_failed_transactions);
+        assert_eq!(result, expected_result);
+        assert_eq!(transaction_ledger, expected_transaction_ledger);
+    }
+
+    #[test]
+    fn test_resolve_undisputed_transaction() {
+        let mut result = get_default_ledger();
+        let expected_result = get_default_ledger();
+
+        let record = LedgerEntry {
+            tx_type: TransactionType::Resolve,
+            client: 1,
+            tx: 1,
+            amount: None,
+            is_disputed: false,
+        };
+
+        let mut transaction_ledger: HashMap<u32, LedgerEntry> = get_default_transactions();
+        let expected_transaction_ledger: HashMap<u32, LedgerEntry> = get_default_transactions();
+        let mut failed_transactions: Vec<(LedgerEntry, TransactionError)> = vec![];
+        let expected_failed_transactions = vec![(
+            record.clone(),
+            TransactionError::CannotResolveUndisputedTransaction,
+        )];
+
+        process_transaction(
+            &record,
+            &mut result,
+            &mut transaction_ledger,
+            &mut failed_transactions,
+        );
+
+        assert_eq!(failed_transactions, expected_failed_transactions);
+        assert_eq!(result, expected_result);
+        assert_eq!(transaction_ledger, expected_transaction_ledger);
+    }
+
+    #[test]
+    fn test_chargeback_undisputed_transaction() {
+        let mut result = get_default_ledger();
+        let expected_result = get_default_ledger();
+
+        let record = LedgerEntry {
+            tx_type: TransactionType::Chargeback,
+            client: 1,
+            tx: 1,
+            amount: None,
+            is_disputed: false,
+        };
+
+        let mut transaction_ledger: HashMap<u32, LedgerEntry> = get_default_transactions();
+        let expected_transaction_ledger: HashMap<u32, LedgerEntry> = get_default_transactions();
+        let mut failed_transactions: Vec<(LedgerEntry, TransactionError)> = vec![];
+        let expected_failed_transactions = vec![(
+            record.clone(),
+            TransactionError::CannotChargebackUndisputedTransaction,
+        )];
+
+        process_transaction(
+            &record,
+            &mut result,
+            &mut transaction_ledger,
+            &mut failed_transactions,
+        );
+
+        assert_eq!(failed_transactions, expected_failed_transactions);
+        assert_eq!(result, expected_result);
+        assert_eq!(transaction_ledger, expected_transaction_ledger);
+    }
+
 }
