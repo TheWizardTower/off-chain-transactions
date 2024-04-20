@@ -475,6 +475,7 @@ fn convert_account_info_to_account_info_with_total(
 
 mod tests {
     use super::*;
+
     #[test]
     fn test_dispute_nonexistant_transaction() {
         let mut result = get_default_ledger();
