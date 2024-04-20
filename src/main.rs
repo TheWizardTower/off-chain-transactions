@@ -1180,4 +1180,102 @@ mod tests {
         assert_eq!(transaction_ledger, expected_transaction_ledger);
     }
 
+    #[test]
+    fn test_dispute_mismatched_client_id() {
+        let mut result = get_default_ledger();
+        let expected_result = get_default_ledger();
+
+        let record = LedgerEntry {
+            tx_type: TransactionType::Dispute,
+            client: 2,
+            tx: 1,
+            amount: None,
+            is_disputed: false,
+        };
+
+        let mut transaction_ledger: HashMap<u32, LedgerEntry> = get_default_transactions();
+        let expected_transaction_ledger: HashMap<u32, LedgerEntry> = get_default_transactions();
+        let mut failed_transactions: Vec<(LedgerEntry, TransactionError)> = vec![];
+        let expected_failed_transactions = vec![(
+            record.clone(),
+            TransactionError::DisputeTransactionClientIDDoesNotMatchRequestClientID,
+        )];
+
+        process_transaction(
+            &record,
+            &mut result,
+            &mut transaction_ledger,
+            &mut failed_transactions,
+        );
+
+        assert_eq!(failed_transactions, expected_failed_transactions);
+        assert_eq!(result, expected_result);
+        assert_eq!(transaction_ledger, expected_transaction_ledger);
+    }
+
+    #[test]
+    fn test_resolve_mismatched_client_id() {
+        let mut result = get_default_ledger();
+        let expected_result = get_default_ledger();
+
+        let record = LedgerEntry {
+            tx_type: TransactionType::Resolve,
+            client: 2,
+            tx: 1,
+            amount: None,
+            is_disputed: false,
+        };
+
+        let mut transaction_ledger: HashMap<u32, LedgerEntry> = get_default_transactions();
+        let expected_transaction_ledger: HashMap<u32, LedgerEntry> = get_default_transactions();
+        let mut failed_transactions: Vec<(LedgerEntry, TransactionError)> = vec![];
+        let expected_failed_transactions = vec![(
+            record.clone(),
+            TransactionError::ResolveTransactionClientIDDoesNotMatchRequestClientID,
+        )];
+
+        process_transaction(
+            &record,
+            &mut result,
+            &mut transaction_ledger,
+            &mut failed_transactions,
+        );
+
+        assert_eq!(failed_transactions, expected_failed_transactions);
+        assert_eq!(result, expected_result);
+        assert_eq!(transaction_ledger, expected_transaction_ledger);
+    }
+
+    #[test]
+    fn test_chargeback_mismatched_client_id() {
+        let mut result = get_default_ledger();
+        let expected_result = get_default_ledger();
+
+        let record = LedgerEntry {
+            tx_type: TransactionType::Chargeback,
+            client: 2,
+            tx: 1,
+            amount: None,
+            is_disputed: false,
+        };
+
+        let mut transaction_ledger: HashMap<u32, LedgerEntry> = get_default_transactions();
+        let expected_transaction_ledger: HashMap<u32, LedgerEntry> = get_default_transactions();
+        let mut failed_transactions: Vec<(LedgerEntry, TransactionError)> = vec![];
+        let expected_failed_transactions = vec![(
+            record.clone(),
+            TransactionError::ChargebackTransactionClientIDDoesNotMatchRequestClientID,
+        )];
+
+        process_transaction(
+            &record,
+            &mut result,
+            &mut transaction_ledger,
+            &mut failed_transactions,
+        );
+
+        assert_eq!(failed_transactions, expected_failed_transactions);
+        assert_eq!(result, expected_result);
+        assert_eq!(transaction_ledger, expected_transaction_ledger);
+    }
 }
