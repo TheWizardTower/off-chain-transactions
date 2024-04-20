@@ -1322,4 +1322,22 @@ mod tests {
 
         Ok(())
     }
+
+    #[tokio::test]
+    async fn test_million_rows() -> Result<()> {
+        let ledger = process_transactions("src/1m_rows.csv").await?;
+        assert_eq!(
+            ledger,
+            HashMap::from([(
+                1,
+                AccountInfo {
+                    available: 50_000_000.00,
+                    held: 0.0,
+                    locked: false,
+                }
+            )])
+        );
+
+        Ok(())
+    }
 }
