@@ -15,7 +15,10 @@
 // get_default_transactions, which are used in a number of tests,
 // here. The values here are chosen with care, to ensure we hit the
 // code paths we expect.
+
 use super::*;
+// We don't import this in the main module, so we have to pull it in here.
+use crate::processing::process_transaction;
 
 // This is a helper function I use in several tests. It isn't called
 // in production code, but is absolutely useful, and used.
