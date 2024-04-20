@@ -15,7 +15,7 @@ refer to a record of transactions to find the amount in question.
 You can call this program via running:
 
 ```shell
-cargo run your_csv_file.csv
+cargo run -- your_csv_file.csv
 ```
 
 After the program is done processing, it will output a CSV table of
@@ -23,7 +23,7 @@ each customer's holdings, and account status. It's completely possible
 to redirect the program's output to a csv file, like so:
 
 ```shell
-cargo run your_csv_file.csv > ledger_result.csv
+cargo run -- your_csv_file.csv > ledger_result.csv
 ```
 
 Also available is instrumentation of what's happening where via the
