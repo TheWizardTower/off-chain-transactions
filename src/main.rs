@@ -1,5 +1,5 @@
 use anyhow::Result;
-use log::{debug, info};
+use log::{debug, error, info};
 use rust_decimal::prelude::*;
 use rust_decimal_macros::dec;
 use std::collections::HashMap;
@@ -95,38 +95,19 @@ struct LedgerEntry {
     disputed_status: TransactionStatus,
 }
 
+// This is a helper function for the disputed_status field in the
+// LedgerEntry struct above. This allows us to set a default value for
+// a field that Serde is not expected to serialize up from the CSV
+// rows we're taking in.
 fn disputed_default() -> TransactionStatus {
     TransactionStatus::Undisputed
 }
 
-#[derive(Clone, Debug, serde::Deserialize, serde::Serialize, PartialEq)]
-#[serde(rename_all = "lowercase")]
-#[serde(tag = "type")]
-enum LedgerEntryEnum {
-    Deposit {
-        client: u16,
-        tx: u32,
-        amount: Decimal,
-    },
-    Withdrawal {
-        client: u16,
-        tx: u32,
-        amount: Decimal,
-    },
-    Dispute {
-        client: u16,
-        tx: u32,
-    },
-    Resolve {
-        client: u16,
-        tx: u32,
-    },
-    Chargeback {
-        client: u16,
-        tx: u32,
-    },
-}
-
+// A list of all the failures we know about in our program. We don't
+// expose these to the user as yet, but these have proven enormously
+// useful in testing, to prove that we got to the code path we
+// expected to. It's also paving the way later on for giving feedback
+// to the user, which is always a good thing.
 #[derive(Debug, PartialEq)]
 enum TransactionError {
     DuplicateTransactionId,
@@ -150,6 +131,7 @@ enum TransactionError {
     CannotChargebackAlreadyChargebackedTransaction,
     CannotResolveChargebackedTransaction,
     CannotDisputeAlreadyChargebackedTransaction,
+    CannotResolveForLockedAccount,
 }
 
 #[tokio::main]
@@ -161,11 +143,15 @@ pub async fn main() -> Result<()> {
     let args: Vec<_> = std::env::args().collect();
     let filename = match args.get(1) {
         None => {
-            // error!("Require filename to read in as an argument.");
-            // std::process::exit(-1);
+            // We also could return a default value, which may make
+            // in-editor calls to `cargo test` a bit more convenient,
+            // but that isn't a good 'default' option.
+            error!("Require filename to read in as an argument.");
+            std::process::exit(-1);
             // Assume that the default is "transactions.csv"
-            "transactions.csv".to_string()
+            // "transactions.csv".to_string()
         }
+        // the to_string() call is only there to get rid of the borrow.
         Some(file_name) => file_name.to_string(),
     };
 
@@ -178,6 +164,20 @@ pub async fn main() -> Result<()> {
     Ok(())
 }
 
+// This is a utility function to render out the ledger to stdout.
+// Since we take in a map of u16 -> AccountInfo, we have to massage
+// the data a bit before sending it out.
+//
+// First, since we haven't tracked it while processing transactions,
+// we calculate the Total field for an account, which should always be
+// available + held.
+//
+// Second, since we kept the client ID as the key to the hash (in
+// deference to the assumed invariant of every client having only one
+// account), we put that field back in.
+//
+// Once the munging is done, we render it out (with headers) as CSV to
+// stdout.
 async fn write_ledger(ledger: &mut HashMap<u16, AccountInfo>) -> Result<()> {
     let mut wri = csv_async::AsyncWriterBuilder::new()
         .has_headers(true)
@@ -192,15 +192,57 @@ async fn write_ledger(ledger: &mut HashMap<u16, AccountInfo>) -> Result<()> {
     Ok(())
 }
 
+// This is a utility function for write_ledger, its purpose is to
+// convert betwen an AccountInfo struct and an AccountInfoWithTotal
+// struct. This latter type has two differences:
+//
+// 1. There's a new total field, which is equal to avaialble + held pools.
+// 2. The client ID is recorded in the struct, rather than being the
+// key in the hashmap.
+fn convert_account_info_to_account_info_with_total(
+    ai: &AccountInfo,
+    client: &u16,
+) -> AccountInfoWithTotal {
+    AccountInfoWithTotal {
+        client: *client,
+        available: ai.available,
+        held: ai.held,
+        total: ai.available + ai.held,
+        locked: ai.locked,
+    }
+}
+
+// Utility predicate. This is important to check with every
+// transaction type we run. If it's a deposit or withdrawal, it should
+// have a unique (i.e., new) transaction ID. Disputes, Resolutions,
+// and Chargebacks, however, refer to *already-existing* transaction
+// IDs. Either way, having this around is very useful.
 fn transaction_id_is_new(txid: &u32, transaction_ledger: &HashMap<u32, LedgerEntry>) -> bool {
     !transaction_ledger.contains_key(txid)
 }
 
+// This function sets up the IO that our business logic will work in.
+// We take in a filename, open that file, wire it up to an async
+// deserializer from the csv_async crate, and then call
+// process_transaction on the resulting record.
+//
+// Note that we also create a number of mutable data structures.
+//
+// `result` is the ledger of client information we're expected to
+// write out to stdout as CSV at the end of execution,
+//
+// `transaction_ledger` is the set of successful deposits and
+// withdrawals, which enables us to refer back in the case of
+// Disputes, Resolutions, and Chargebacks.
+//
+// `failed_transactions` is a record of what transactions were
+// rejected, and why. This point in particular is tremendously useful
+// for testing.
 async fn process_transactions(filename: impl AsRef<Path>) -> Result<HashMap<u16, AccountInfo>> {
-    let file_handle = File::open(filename).await?;
     let mut result: HashMap<u16, AccountInfo> = HashMap::from([]);
     let mut transaction_ledger: HashMap<u32, LedgerEntry> = HashMap::from([]);
     let mut failed_transactions: Vec<(LedgerEntry, TransactionError)> = vec![];
+    let file_handle = File::open(filename).await?;
     let rdr = csv_async::AsyncReaderBuilder::new()
         .flexible(true)
         .trim(csv_async::Trim::All)
@@ -220,6 +262,12 @@ async fn process_transactions(filename: impl AsRef<Path>) -> Result<HashMap<u16,
     Ok(result)
 }
 
+// process_transaction is the start of the core business logic. All
+// this function does is dispatch from the transaction type to the
+// appropriate process_<type> function. However, from here on out, the
+// only IO you're going to see should be either 1) logging, or 2)
+// mutating data structures we've been given mutable references to.
+// This makes testing much easier to set up and do.
 fn process_transaction(
     record: &LedgerEntry,
     result: &mut HashMap<u16, AccountInfo>,
@@ -245,6 +293,17 @@ fn process_transaction(
     }
 }
 
+// Process Deposits. These are probably the most lax type of
+// transactions. We don't even require that a customer exist, we
+// presume that this is the initial deposit on account creation. We
+// check if the transaction ID is new, if the amount field is present,
+// and if the account both exists and is locked from an earlier
+// chargeback. If the transaction fails, we add it to
+// failed_transactions as a tuple, along with the reason for
+// rejection, as represented by the TransactionError type.
+// If all is well, we either add to an existing account, or
+// create a new one with the amount balance. Lastly, we add the
+// deposit record to the transaction_ledger in case of future dispute.
 fn process_deposit(
     record: &LedgerEntry,
     result: &mut HashMap<u16, AccountInfo>,
@@ -290,6 +349,15 @@ fn process_deposit(
     transaction_ledger.insert(record.tx, record.clone());
 }
 
+// Process withdrawals. We check the same things as with Deposits,
+// with the added constraint that we cannot withdraw money from a
+// non-existant account, and we cannot overdraft an existing account.
+// If something is found to be wrong, we add it to failed_transactions
+// as a tuple, along with the reason the withdrawal was rejected as
+// represented by the TransactionError type. If all sanity checks
+// pass, we remove the amount from the acocunt, and add the
+// transaciton to transaction_ledger for later reference in case of
+// dispute.
 fn process_withdrawal(
     record: &LedgerEntry,
     result: &mut HashMap<u16, AccountInfo>,
@@ -339,21 +407,32 @@ fn process_withdrawal(
     transaction_ledger.insert(record.tx, record.clone());
 }
 
+// process_dispute has a bit more homework to do. There are a number of conditions that have to be met, which we will go through here:
+//
+// 1. The customer ID in the record we were given must refer to an actual, pre-existing customer.
+// 2. The transaction ID in the record we were given must refer to an actual, pre-existing transaction.
+// 3. The transaction's customer ID and the record's customer ID must match.
+// 4. The transaction in question must not already be either in dispute or chargebacked.
+//
+// Assuming all these conditionals are satisfied, we move the
+// transaction amount from available to held in the customer's
+// account, and mark the transaction as disputed in the transaction
+// ledger.
+//
+// Note that we cannot record this LedgerEntry value in the
+// transaction_ledger, as we were not given a unique transaction ID
+// for it. We could, in the future, add a field that Serde didn't
+// expect to serialize in or out, that recorded the history of
+// disputes, resolutions, and (if any) ultimate chargeback, if we so
+// chose. However, this does give us an advantage in that we cannot
+// get caught up in "meta-disputes", i.e., disputes _about_ disputes,
+// resolutions, or chargebacks.
 fn process_dispute(
     record: &LedgerEntry,
     result: &mut HashMap<u16, AccountInfo>,
     transaction_ledger: &mut HashMap<u32, LedgerEntry>,
     failed_transactions: &mut Vec<(LedgerEntry, TransactionError)>,
 ) {
-    // Open questions:
-    //
-    // * Can you dispute a _dispute_ ?
-    //   - My intuition is you shouldn't be able to, but this
-    //   really ought to be answered by the stakeholder.
-    // * Can you dispute a chargeback or resolution? Probably not.
-    //
-    // * What happens if the client ID on the dispute message does not match the client ID on the transaction?
-    //   - We should probably abort, on the assumption that it's invalid data.
     debug!("Found a Dispute.");
     // We check the customer first because, if the customer
     // does not exist, than the associated transaction
@@ -419,6 +498,23 @@ fn process_dispute(
         .and_modify(|entry| entry.disputed_status = TransactionStatus::Disputed);
 }
 
+// similar to process_dispute, we have a number of conditionals to check before processing this.
+//
+// 1. The customer ID in the record we were given must refer to an actual, pre-existing customer.
+// 2. The transaction ID in the record we were given must refer to an actual, pre-existing transaction.
+// 3. The transaction's customer ID and the record's customer ID must match.
+// 4. The client in question must have a valid (i.e., not locked) account.
+// 5. The transaction in question must be disputed, it cannot be undisputed or already chargebacked.
+//
+// Assuming all is satisfied, we then move the transaction amount from
+// held to available, and mark the transaction as undisputed in the
+// transaction ledger.
+//
+// Not also that, like disputes and chargebacks, we cannot record this
+// LedgerEntry value in the transaction ledger, as we have no unique
+// transaction ID for it. However, this prevents us from getting
+// caught up in "meta-disputes", or disputes about disputes,
+// resolutions, or chargebacks.
 fn process_resolve(
     record: &LedgerEntry,
     result: &mut HashMap<u16, AccountInfo>,
@@ -457,6 +553,18 @@ fn process_resolve(
         return;
     }
 
+    if result.get(&record.client).unwrap().locked {
+        // If your account is locked, you probably ought to speak with
+        // a human, rather than the automated system. Refuse to
+        // proceed further until that is sorted out.
+        info!("Resolve: Cannot resolve a transaction for a locked account.");
+        failed_transactions.push((
+            record.clone(),
+            TransactionError::CannotResolveForLockedAccount,
+        ));
+        return;
+    }
+
     if transaction_ledger.get(&record.tx).unwrap().disputed_status == TransactionStatus::Undisputed
     {
         info!("Resolve: Cannot Resolve Undisputed Transaction.");
@@ -478,7 +586,6 @@ fn process_resolve(
         return;
     }
 
-    // What should we do in the case of a locked account?
     let transaction_amount = get_transaction_amount(&record.tx, transaction_ledger);
     result.entry(record.client).and_modify(|client_data| {
         client_data.available += transaction_amount;
@@ -489,6 +596,19 @@ fn process_resolve(
         .and_modify(|entry| entry.disputed_status = TransactionStatus::Undisputed);
 }
 
+// process_chargeback, like process_dispute and process_resolve, a number of predicates to check.
+//
+// 1. The customer ID in the record we were given must refer to an actual, pre-existing customer.
+// 2. The transaction ID in the record we were given must refer to an actual, pre-existing transaction.
+// 3. The transaction's customer ID and the record's customer ID must match.
+// 4. The transaction in question must be in dispute, it cannot be either undisputet or already chargebacked.
+//
+// If something is amiss, we add the record to failed_transaction,
+// along with a TransactionError type explaining why.
+//
+// If all is well, we withdraw the transaction amount from held, mark
+// that client's account as locked, and mark the transaction as
+// chargebacked.
 fn process_chargeback(
     record: &LedgerEntry,
     result: &mut HashMap<u16, AccountInfo>,
@@ -566,23 +686,33 @@ fn process_chargeback(
         .and_modify(|entry| entry.disputed_status = TransactionStatus::Chargebacked);
 }
 
+// This is a utility function for dispute, resolve, and chargeback
+// functions. They don't carry any information about the amount of the
+// transaction, relying on us to record that information. We access
+// that here. Note that we directly unwrap, the assumption is that the
+// calling function has already validated that the transaction ID is
+// valid.
 fn get_transaction_amount(tx: &u32, transaction_ledger: &HashMap<u32, LedgerEntry>) -> Decimal {
     transaction_ledger.get(tx).unwrap().amount.unwrap()
 }
 
-fn convert_account_info_to_account_info_with_total(
-    ai: &AccountInfo,
-    client: &u16,
-) -> AccountInfoWithTotal {
-    AccountInfoWithTotal {
-        client: *client,
-        available: ai.available,
-        held: ai.held,
-        total: ai.available + ai.held,
-        locked: ai.locked,
-    }
-}
-
+// A note about the tests. First, every TransactionError should be
+// exercised here. Second, we should also exercise the
+// happy/successful path, and make sure that each transaction updates
+// the data structures as it should, and leaves the others alone.
+// Third, we also have two tests at the end that are more of an
+// integration/performance test. That is, we call the
+// process_transactions function on a file with 1 million rows in the
+// repo, and ensure that we get a correct result. This validates that
+// our math doesn't encur error, even in large values, or repeated
+// small operations. It may be desirable to make those hidden behind a
+// feature flag, so they don't slow down the much faster unit tests of
+// process_transaction.
+//
+// There are two utility functions here, get_default_ledger and
+// get_default_transactions, which are used in a number of tests,
+// here. The values here are chosen with care, to ensure we hit the
+// code paths we expect.
 mod tests {
     use super::*;
 
@@ -776,35 +906,6 @@ mod tests {
         );
         assert_eq!(transaction_ledger, HashMap::from([]));
         assert_eq!(result, HashMap::from([]))
-    }
-
-    fn get_default_ledger() -> HashMap<u16, AccountInfo> {
-        HashMap::from([
-            (
-                1,
-                AccountInfo {
-                    available: dec!(50.0),
-                    held: dec!(0.0),
-                    locked: false,
-                },
-            ),
-            (
-                2,
-                AccountInfo {
-                    available: dec!(0.0),
-                    held: dec!(0.0),
-                    locked: true,
-                },
-            ),
-            (
-                3,
-                AccountInfo {
-                    available: dec!(500.0),
-                    held: dec!(100.0),
-                    locked: false,
-                },
-            ),
-        ])
     }
 
     #[test]
@@ -1153,6 +1254,35 @@ mod tests {
         assert_eq!(transaction_ledger, HashMap::from([]));
     }
 
+    fn get_default_ledger() -> HashMap<u16, AccountInfo> {
+        HashMap::from([
+            (
+                1,
+                AccountInfo {
+                    available: dec!(50.0),
+                    held: dec!(0.0),
+                    locked: false,
+                },
+            ),
+            (
+                2,
+                AccountInfo {
+                    available: dec!(0.0),
+                    held: dec!(0.0),
+                    locked: true,
+                },
+            ),
+            (
+                3,
+                AccountInfo {
+                    available: dec!(500.0),
+                    held: dec!(100.0),
+                    locked: false,
+                },
+            ),
+        ])
+    }
+
     fn get_default_transactions() -> HashMap<u32, LedgerEntry> {
         HashMap::from([
             (
@@ -1178,19 +1308,39 @@ mod tests {
             (
                 3,
                 LedgerEntry {
-                    tx_type: TransactionType::Dispute,
+                    tx_type: TransactionType::Deposit,
                     client: 1,
                     tx: 2,
-                    amount: None,
+                    amount: Some(dec!(50.0)),
                     disputed_status: TransactionStatus::Undisputed,
                 },
             ),
             (
                 4,
                 LedgerEntry {
-                    tx_type: TransactionType::Dispute,
+                    tx_type: TransactionType::Deposit,
                     client: 3,
                     tx: 4,
+                    amount: Some(dec!(50.0)),
+                    disputed_status: TransactionStatus::Disputed,
+                },
+            ),
+            (
+                5,
+                LedgerEntry {
+                    tx_type: TransactionType::Withdrawal,
+                    client: 2,
+                    tx: 4,
+                    amount: Some(dec!(50.0)),
+                    disputed_status: TransactionStatus::Chargebacked,
+                },
+            ),
+            (
+                6,
+                LedgerEntry {
+                    tx_type: TransactionType::Deposit,
+                    client: 2,
+                    tx: 6,
                     amount: Some(dec!(50.0)),
                     disputed_status: TransactionStatus::Disputed,
                 },
@@ -1217,6 +1367,39 @@ mod tests {
         let expected_failed_transactions = vec![(
             record.clone(),
             TransactionError::CannotDisputeAlreadyDisputedTransaction,
+        )];
+
+        process_transaction(
+            &record,
+            &mut result,
+            &mut transaction_ledger,
+            &mut failed_transactions,
+        );
+
+        assert_eq!(failed_transactions, expected_failed_transactions);
+        assert_eq!(result, expected_result);
+        assert_eq!(transaction_ledger, expected_transaction_ledger);
+    }
+
+    #[test]
+    fn test_resolve_transaction_for_locked_account() {
+        let mut result = get_default_ledger();
+        let expected_result = get_default_ledger();
+
+        let record = LedgerEntry {
+            tx_type: TransactionType::Resolve,
+            client: 2,
+            tx: 6,
+            amount: None,
+            disputed_status: TransactionStatus::Undisputed,
+        };
+
+        let mut transaction_ledger: HashMap<u32, LedgerEntry> = get_default_transactions();
+        let expected_transaction_ledger: HashMap<u32, LedgerEntry> = get_default_transactions();
+        let mut failed_transactions: Vec<(LedgerEntry, TransactionError)> = vec![];
+        let expected_failed_transactions = vec![(
+            record.clone(),
+            TransactionError::CannotResolveForLockedAccount,
         )];
 
         process_transaction(
@@ -1507,6 +1690,39 @@ mod tests {
         assert_eq!(transaction_ledger, expected_transaction_ledger);
     }
 
+    #[test]
+    fn test_chargeback_on_chargebacked_transaction() {
+        let mut result = get_default_ledger();
+        let expected_result = get_default_ledger();
+
+        let record = LedgerEntry {
+            tx_type: TransactionType::Chargeback,
+            client: 2,
+            tx: 5,
+            amount: None,
+            disputed_status: TransactionStatus::Undisputed,
+        };
+
+        let mut transaction_ledger: HashMap<u32, LedgerEntry> = get_default_transactions();
+        let expected_transaction_ledger: HashMap<u32, LedgerEntry> = get_default_transactions();
+        let mut failed_transactions: Vec<(LedgerEntry, TransactionError)> = vec![];
+        let expected_failed_transactions = vec![(
+            record.clone(),
+            TransactionError::CannotChargebackAlreadyChargebackedTransaction,
+        )];
+
+        process_transaction(
+            &record,
+            &mut result,
+            &mut transaction_ledger,
+            &mut failed_transactions,
+        );
+
+        assert_eq!(failed_transactions, expected_failed_transactions);
+        assert_eq!(result, expected_result);
+        assert_eq!(transaction_ledger, expected_transaction_ledger);
+    }
+
     #[tokio::test]
     async fn test_whitespace_deposits() -> Result<()> {
         let ledger = process_transactions("src/deposit.csv").await?;
@@ -1592,6 +1808,4 @@ mod tests {
 
         Ok(())
     }
-
-    // CannotChargebackAlreadyChargebackedTransaction
 }
