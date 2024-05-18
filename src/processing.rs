@@ -46,6 +46,11 @@ pub async fn process_transactions(filename: impl AsRef<Path>) -> Result<HashMap<
     let mut records = rdr.into_deserialize::<LedgerEntry>();
 
     while let Some(record) = records.next().await {
+        if record.is_err() {
+            // If we encounter a corrupted row, don't process it, but
+            // don't abort the overall processing job.
+            continue;
+        }
         let record: LedgerEntry = record?;
         process_transaction(
             &record,

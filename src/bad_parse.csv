@@ -1,0 +1,5 @@
+type,client,tx,amount
+deposit, 1, 1, 50.00
+this,should,not,parse
+deposit, 1, 2, 50.00
+deposit, 1, 3, 50.00

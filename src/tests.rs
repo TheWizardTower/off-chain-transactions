@@ -1116,3 +1116,21 @@ async fn test_million_rows_large_transactions() -> Result<()> {
 
     Ok(())
 }
+
+#[tokio::test]
+async fn test_corrupt_row_behavior() -> Result<()> {
+    let ledger = process_transactions("src/bad_parse.csv").await?;
+    assert_eq!(
+        ledger,
+        HashMap::from([(
+            1,
+            AccountInfo {
+                available: dec!(150.00),
+                held: dec!(0.0),
+                locked: false,
+            }
+        )])
+    );
+
+    Ok(())
+}
