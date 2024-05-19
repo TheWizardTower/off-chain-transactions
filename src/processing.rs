@@ -219,10 +219,11 @@ fn process_withdrawal(
 // 3. The transaction's customer ID and the record's customer ID must match.
 // 4. The transaction in question must not already be either in dispute or chargebacked.
 //
-// Assuming all these conditionals are satisfied, we move the
-// transaction amount from available to held in the customer's
-// account, and mark the transaction as disputed in the transaction
-// ledger.
+// Assuming all these conditionals are satisfied, we roll back the
+// selected transaction. This means that if it was a deposit, we debit
+// the amount from Available into Held, and if it was a Withdrawal, we
+// credit the amount into Held. Then, we mark the transaction as
+// disputed in the transaction ledger.
 //
 // Note that we cannot record this LedgerEntry value in the
 // transaction_ledger, as we were not given a unique transaction ID
@@ -294,6 +295,21 @@ fn process_dispute(
     // What should we do in the case of a locked account?
     debug!("Dispute: Processing Dispute.");
     let transaction_amount = get_transaction_amount(&record.tx, transaction_ledger);
+    match transaction_ledger.get(&record.tx).unwrap().tx_type {
+        TransactionType::Deposit => {
+            result.entry(record.client).and_modify(|client_data| {
+                client_data.available -= transaction_amount;
+                client_data.held += transaction_amount;
+            });
+        }
+        TransactionType::Withdrawal => {
+            result.entry(record.client).and_modify(|client_data| {
+                client_data.held += transaction_amount;
+            });
+        }
+        // TODO: Find a nicer thing to do, here.
+        _ => return,
+    }
     result.entry(record.client).and_modify(|client_data| {
         client_data.available -= transaction_amount;
         client_data.held += transaction_amount;
@@ -392,10 +408,21 @@ fn process_resolve(
     }
 
     let transaction_amount = get_transaction_amount(&record.tx, transaction_ledger);
-    result.entry(record.client).and_modify(|client_data| {
-        client_data.available += transaction_amount;
-        client_data.held -= transaction_amount;
-    });
+    match transaction_ledger.get(&record.tx).unwrap().tx_type {
+        TransactionType::Deposit => {
+            result.entry(record.client).and_modify(|client_data| {
+                client_data.available += transaction_amount;
+                client_data.held -= transaction_amount;
+            });
+        }
+        TransactionType::Withdrawal => {
+            result.entry(record.client).and_modify(|client_data| {
+                client_data.held -= transaction_amount;
+            });
+        }
+        // TODO: Find a nicer thing to do, here.
+        _ => return,
+    }
     transaction_ledger
         .entry(record.tx)
         .and_modify(|entry| entry.disputed_status = TransactionStatus::Undisputed);
@@ -481,10 +508,23 @@ fn process_chargeback(
     // is quite likely. As such, there's no check if the
     // account is already locked.
     let transaction_amount = get_transaction_amount(&record.tx, transaction_ledger);
-    result.entry(record.client).and_modify(|client_data| {
-        client_data.held -= transaction_amount;
-        client_data.locked = true;
-    });
+
+    match transaction_ledger.get(&record.tx).unwrap().tx_type {
+        TransactionType::Deposit => {
+            result.entry(record.client).and_modify(|client_data| {
+                client_data.held -= transaction_amount;
+                client_data.locked = true;
+            });
+        }
+        TransactionType::Withdrawal => {
+            result.entry(record.client).and_modify(|client_data| {
+                client_data.held -= transaction_amount;
+                client_data.available += transaction_amount;
+            });
+        }
+        // TODO: Find a nicer thing to do, here.
+        _ => return,
+    }
 
     transaction_ledger
         .entry(record.tx)

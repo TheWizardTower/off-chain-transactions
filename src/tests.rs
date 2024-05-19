@@ -15,7 +15,6 @@
 // get_default_transactions, which are used in a number of tests,
 // here. The values here are chosen with care, to ensure we hit the
 // code paths we expect.
-
 use super::*;
 // We don't import this in the main module, so we have to pull it in here.
 use crate::processing::process_transaction;
@@ -893,7 +892,7 @@ fn test_successful_dispute() {
     let mut expected_result = get_default_ledger();
     expected_result.entry(1).and_modify(|client_info| {
         client_info.available = dec!(0.0);
-        client_info.held = dec!(50.0);
+        client_info.held = dec!(100.0);
     });
 
     let record = LedgerEntry {

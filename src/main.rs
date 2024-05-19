@@ -6,8 +6,10 @@ use std::collections::HashMap;
 
 mod processing;
 mod render_ledger;
-mod tests;
 mod types;
+
+#[cfg(test)]
+mod tests;
 
 use crate::processing::process_transactions;
 use crate::render_ledger::write_ledger;
